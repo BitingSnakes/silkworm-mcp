@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+
 from mcp_server import (
     CrawlBlueprint,
     CrawlFieldSpec,
+    _extract_item,
     generate_spider_template,
     list_documents,
     query_selector,
@@ -31,6 +34,20 @@ SAMPLE_HTML = """
   </body>
 </html>
 """.strip()
+
+
+class _FakeScope:
+    async def select(self, query: str):
+        return []
+
+    async def select_first(self, query: str):
+        return None
+
+    async def xpath(self, query: str):
+        return []
+
+    async def xpath_first(self, query: str):
+        return None
 
 
 def main() -> None:
@@ -77,6 +94,24 @@ def main() -> None:
     )
     print("template class:", template.class_name)
     print("template preview:", template.code.splitlines()[0])
+
+    synthetic_source_blueprint = CrawlBlueprint(
+        start_urls=["https://example.com/catalog"],
+        item_selector=".product",
+        include_source_url=False,
+        fields=[
+            CrawlFieldSpec(name="name", css=".name"),
+            CrawlFieldSpec(name="source_url", default=None),
+        ],
+    )
+    extracted = asyncio.run(
+        _extract_item(
+            _FakeScope(),
+            synthetic_source_blueprint.fields,
+            base_url="https://example.com/catalog",
+        )
+    )
+    print("synthetic source_url:", extracted["source_url"])
 
 
 if __name__ == "__main__":

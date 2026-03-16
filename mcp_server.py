@@ -211,6 +211,9 @@ class CrawlFieldSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_query(self) -> "CrawlFieldSpec":
+        is_synthetic_source_url = self.name in {"source_url", "_source_url"}
+        if is_synthetic_source_url and not self.css and not self.xpath:
+            return self
         if bool(self.css) == bool(self.xpath):
             raise ValueError(
                 f"Field '{self.name}' must define exactly one of 'css' or 'xpath'."
@@ -664,12 +667,21 @@ def _query_pair_to_mode_and_query(
     return None
 
 
+def _is_synthetic_source_url_field(field_spec: CrawlFieldSpec) -> bool:
+    return field_spec.name in {"source_url", "_source_url"}
+
+
 async def _extract_field_value(
     scope: Any,
     field_spec: CrawlFieldSpec,
     *,
     base_url: str,
 ) -> Any:
+    if _is_synthetic_source_url_field(field_spec) and not (
+        field_spec.css or field_spec.xpath
+    ):
+        return base_url or field_spec.default
+
     mode, query = _query_pair_to_mode_and_query(
         css=field_spec.css,
         xpath=field_spec.xpath,
@@ -793,6 +805,8 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
             async def _extract_field(self, scope, field: dict[str, object], base_url: str):
                 mode = "css" if field.get("css") else "xpath"
                 query = field.get("css") or field.get("xpath")
+                if not query and field.get("name") in {"source_url", "_source_url"}:
+                    return base_url or field.get("default")
                 if not query:
                     return field.get("default")
 
