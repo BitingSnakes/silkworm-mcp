@@ -464,6 +464,17 @@ def _normalize_identifier(name: str, default: str = "GeneratedSpider") -> str:
     return candidate
 
 
+_LEADING_DOCTYPE_RE = re.compile(r"^\s*<!DOCTYPE[^>]*>\s*", re.IGNORECASE)
+
+
+def _strip_leading_doctype(html: str) -> str:
+    return _LEADING_DOCTYPE_RE.sub("", html, count=1)
+
+
+def _is_unsupported_xpath_dtd_error(error: ValueError) -> bool:
+    return "DTD is not supported" in str(error)
+
+
 def _resolve_document_input(
     *,
     document_handle: str | None = None,
@@ -526,7 +537,20 @@ def _query_document(
 ) -> list[Any]:
     if mode == SelectorMode.css:
         return document.select(query)
-    return document.xpath(query)
+    try:
+        return document.xpath(query)
+    except ValueError as exc:
+        sanitized_html = _strip_leading_doctype(document.html)
+        if (
+            not _is_unsupported_xpath_dtd_error(exc)
+            or sanitized_html == document.html
+        ):
+            raise
+        fallback_document = scraper_rs.Document(sanitized_html)
+        try:
+            return fallback_document.xpath(query)
+        finally:
+            fallback_document.close()
 
 
 def _query_document_first(
@@ -537,7 +561,20 @@ def _query_document_first(
 ) -> Any | None:
     if mode == SelectorMode.css:
         return document.select_first(query)
-    return document.xpath_first(query)
+    try:
+        return document.xpath_first(query)
+    except ValueError as exc:
+        sanitized_html = _strip_leading_doctype(document.html)
+        if (
+            not _is_unsupported_xpath_dtd_error(exc)
+            or sanitized_html == document.html
+        ):
+            raise
+        fallback_document = scraper_rs.Document(sanitized_html)
+        try:
+            return fallback_document.xpath_first(query)
+        finally:
+            fallback_document.close()
 
 
 async def _query_scope(scope: Any, *, query: str, mode: SelectorMode) -> list[Any]:
