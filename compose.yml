@@ -1,0 +1,9 @@
+services:
+  silkworm-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+      - "9222:9222"
+    restart: unless-stopped
