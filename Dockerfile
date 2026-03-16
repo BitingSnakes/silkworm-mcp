@@ -9,8 +9,8 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}"
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.16 /uv /uvx /bin/
-COPY --from=rust:1.88-slim /usr/local/cargo /usr/local/cargo
-COPY --from=rust:1.88-slim /usr/local/rustup /usr/local/rustup
+COPY --from=rust:1.94-slim /usr/local/cargo /usr/local/cargo
+COPY --from=rust:1.94-slim /usr/local/rustup /usr/local/rustup
 
 WORKDIR /app
 

@@ -71,6 +71,9 @@ def main() -> None:
     blueprint = CrawlBlueprint(
         spider_name="catalog_spider",
         start_urls=["https://example.com/catalog"],
+        transport="cdp",
+        cdp_ws_endpoint="ws://127.0.0.1:9222",
+        cdp_timeout_seconds=30.0,
         default_user_agent="catalog-bot/1.0",
         delay_min_seconds=0.25,
         delay_max_seconds=0.75,
@@ -104,6 +107,8 @@ def main() -> None:
     assert "UserAgentMiddleware" in template.code
     assert "RetryMiddleware" in template.code
     assert 'output_jsonl_path' in template.code
+    assert 'BLUEPRINT.get("transport") == "cdp"' in template.code
+    assert "CDPClient(" in template.code
 
     synthetic_source_blueprint = CrawlBlueprint(
         start_urls=["https://example.com/catalog"],

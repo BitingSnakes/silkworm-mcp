@@ -73,6 +73,8 @@ uv run silkworm-mcp --transport stdio
 {
   "spider_name": "products_spider",
   "start_urls": ["https://example.com/products"],
+  "transport": "cdp",
+  "cdp_ws_endpoint": "ws://127.0.0.1:9222",
   "item_selector": ".product-card",
   "pagination_selector": "a.next",
   "fields": [
@@ -96,6 +98,8 @@ uv run silkworm-mcp --transport stdio
   ]
 }
 ```
+
+Use `transport: "cdp"` when pages require JavaScript rendering. `run_crawl_blueprint` will connect to the configured CDP endpoint, and `generate_spider_template` will emit a starter spider that runs through `CDPClient` instead of the default HTTP client.
 
 ## Local Demo
 

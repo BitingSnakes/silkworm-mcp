@@ -64,6 +64,11 @@ class FieldExtractor(str, Enum):
     attr = "attr"
 
 
+class CrawlTransport(str, Enum):
+    http = "http"
+    cdp = "cdp"
+
+
 class StoredDocumentInfo(BaseModel):
     handle: str
     label: str | None = None
@@ -243,6 +248,20 @@ class CrawlBlueprint(BaseModel):
     request_headers: dict[str, str] = Field(
         default_factory=dict,
         description="Headers attached to start and follow-up requests.",
+    )
+    transport: CrawlTransport = Field(
+        default=CrawlTransport.http,
+        description="Fetch transport used by the runtime crawl and generated spider.",
+    )
+    cdp_ws_endpoint: str = Field(
+        default="ws://127.0.0.1:9222",
+        description="CDP WebSocket endpoint used when transport='cdp'.",
+    )
+    cdp_timeout_seconds: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=300,
+        description="Optional CDP command timeout. Falls back to request_timeout_seconds when omitted.",
     )
     user_agents: list[str] = Field(
         default_factory=list,
@@ -867,6 +886,18 @@ def _build_runtime_response_middlewares(
     ]
 
 
+def _build_cdp_client(blueprint: CrawlBlueprint) -> CDPClient:
+    timeout = blueprint.cdp_timeout_seconds
+    if timeout is None:
+        timeout = blueprint.request_timeout_seconds
+    return CDPClient(
+        ws_endpoint=blueprint.cdp_ws_endpoint,
+        concurrency=blueprint.concurrency,
+        timeout=timeout,
+        html_max_size_bytes=blueprint.html_max_size_bytes,
+    )
+
+
 def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
     safe_class_name = _normalize_identifier(class_name)
     blueprint_literal = pformat(
@@ -879,9 +910,11 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
         f"""
         from __future__ import annotations
 
+        import asyncio
         from urllib.parse import urljoin
 
-        from silkworm import HTMLResponse, Request, Spider, {runner_name}
+        from silkworm import Engine, HTMLResponse, Request, Spider, {runner_name}
+        from silkworm.cdp import CDPClient
         from silkworm.middlewares import DelayMiddleware, RetryMiddleware, UserAgentMiddleware
         from silkworm.pipelines import JsonLinesPipeline
 
@@ -1012,7 +1045,70 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
                     yield request
 
 
+        async def _run_cdp_spider():
+            spider = {safe_class_name}()
+            request_mw = [
+                UserAgentMiddleware(
+                    BLUEPRINT.get("user_agents") or None,
+                    default=BLUEPRINT.get("default_user_agent"),
+                ),
+                DelayMiddleware(
+                    delay=BLUEPRINT.get("delay_seconds"),
+                    min_delay=BLUEPRINT.get("delay_min_seconds"),
+                    max_delay=BLUEPRINT.get("delay_max_seconds"),
+                ),
+            ]
+            response_mw = [
+                RetryMiddleware(
+                    max_times=BLUEPRINT.get("retry_max_times", 3),
+                    retry_http_codes=BLUEPRINT.get("retry_http_codes") or None,
+                    backoff_base=BLUEPRINT.get("retry_backoff_base", 0.5),
+                    sleep_http_codes=BLUEPRINT.get("sleep_http_codes") or None,
+                )
+            ]
+            pipelines = []
+            output_path = BLUEPRINT.get("output_jsonl_path")
+            if output_path:
+                pipelines.append(
+                    JsonLinesPipeline(
+                        output_path,
+                        use_opendal=BLUEPRINT.get("output_use_opendal"),
+                    )
+                )
+
+            engine = Engine(
+                spider,
+                request_middlewares=request_mw,
+                response_middlewares=response_mw,
+                item_pipelines=pipelines,
+                concurrency=BLUEPRINT["concurrency"],
+                request_timeout=BLUEPRINT.get("request_timeout_seconds"),
+                max_pending_requests=BLUEPRINT.get("max_pending_requests"),
+                html_max_size_bytes=BLUEPRINT["html_max_size_bytes"],
+                log_stats_interval=BLUEPRINT.get("log_stats_interval"),
+                keep_alive=BLUEPRINT["keep_alive"],
+            )
+
+            timeout = BLUEPRINT.get("cdp_timeout_seconds")
+            if timeout is None:
+                timeout = BLUEPRINT.get("request_timeout_seconds")
+            cdp_client = CDPClient(
+                ws_endpoint=BLUEPRINT.get("cdp_ws_endpoint", "ws://127.0.0.1:9222"),
+                concurrency=BLUEPRINT["concurrency"],
+                timeout=timeout,
+                html_max_size_bytes=BLUEPRINT["html_max_size_bytes"],
+            )
+            await cdp_client.connect()
+            await engine.http.close()
+            engine.http = cdp_client
+            await engine.run()
+
+
         if __name__ == "__main__":
+            if BLUEPRINT.get("transport") == "cdp":
+                asyncio.run(_run_cdp_spider())
+                raise SystemExit(0)
+
             request_mw = [
                 UserAgentMiddleware(
                     BLUEPRINT.get("user_agents") or None,
@@ -1586,6 +1682,11 @@ async def run_crawl_blueprint(blueprint: CrawlBlueprint) -> CrawlRunResult:
         log_stats_interval=blueprint.log_stats_interval,
         keep_alive=blueprint.keep_alive,
     )
+    if blueprint.transport == CrawlTransport.cdp:
+        cdp_client = _build_cdp_client(blueprint)
+        await cdp_client.connect()
+        await engine.http.close()
+        engine.http = cdp_client
     await engine.run()
     return CrawlRunResult(
         spider_name=blueprint.spider_name,
@@ -1656,6 +1757,7 @@ def silkworm_cheatsheet() -> str:
         - Extract containers: `await response.select("article.card")`
         - Follow pagination: `yield response.follow(next_href, callback=self.parse)`
         - Extract items: yield dicts from `parse()`
+        - JS-rendered pages: set `transport="cdp"` and `cdp_ws_endpoint` in `CrawlBlueprint`
 
         Useful engine knobs:
         - `concurrency`
@@ -1750,7 +1852,8 @@ def plan_silkworm_scraper(goal: str, target_url: str | None = None) -> str:
         2. Identify stable item containers and field selectors.
         3. Validate competing selectors with compare_selectors.
         4. Detect pagination and detail links.
-        5. Produce a CrawlBlueprint and, if helpful, a spider template.
+        5. Use `transport="cdp"` for JavaScript-rendered pages that need a CDP browser.
+        6. Produce a CrawlBlueprint and, if helpful, a spider template.
 
         Prefer document handles over repeatedly embedding raw HTML.
         """
