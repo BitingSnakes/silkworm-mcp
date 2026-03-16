@@ -1,0 +1,19 @@
+[project]
+name = "silkworm-mcp"
+version = "0.1.0"
+description = "An MCP server for https://github.com/BitingSnakes/silkworm"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp>=3.1.1",
+    "pydantic>=2.12.5",
+    "silkworm-rs>=0.3.6",
+]
+
+[project.scripts]
+silkworm-mcp = "mcp_server:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.6",
+]
