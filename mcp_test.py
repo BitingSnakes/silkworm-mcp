@@ -71,6 +71,12 @@ def main() -> None:
     blueprint = CrawlBlueprint(
         spider_name="catalog_spider",
         start_urls=["https://example.com/catalog"],
+        default_user_agent="catalog-bot/1.0",
+        delay_min_seconds=0.25,
+        delay_max_seconds=0.75,
+        retry_max_times=5,
+        sleep_http_codes=[403, 429],
+        output_jsonl_path="data/catalog.jl",
         item_selector=".product",
         pagination_selector="a.next",
         follow_links_selector="a.detail",
@@ -94,6 +100,10 @@ def main() -> None:
     )
     print("template class:", template.class_name)
     print("template preview:", template.code.splitlines()[0])
+    assert "run_spider_uvloop" in template.code
+    assert "UserAgentMiddleware" in template.code
+    assert "RetryMiddleware" in template.code
+    assert 'output_jsonl_path' in template.code
 
     synthetic_source_blueprint = CrawlBlueprint(
         start_urls=["https://example.com/catalog"],
@@ -112,6 +122,19 @@ def main() -> None:
         )
     )
     print("synthetic source_url:", extracted["source_url"])
+
+    try:
+        CrawlBlueprint(
+            start_urls=["https://example.com/catalog"],
+            fields=[CrawlFieldSpec(name="name", css=".name")],
+            delay_seconds=1.0,
+            delay_min_seconds=0.1,
+            delay_max_seconds=0.3,
+        )
+    except ValueError:
+        print("delay validation: ok")
+    else:
+        raise AssertionError("Expected mixed delay configuration to fail validation")
 
 
 if __name__ == "__main__":

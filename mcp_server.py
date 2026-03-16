@@ -20,6 +20,8 @@ from rnet import Emulation
 from silkworm import Engine, HTMLResponse, Request, Spider
 from silkworm.cdp import CDPClient
 from silkworm.http import HttpClient
+from silkworm.middlewares import DelayMiddleware, RetryMiddleware, UserAgentMiddleware
+from silkworm.pipelines import JsonLinesPipeline
 
 SERVER_VERSION = "0.1.0"
 DEFAULT_HTML_MAX_SIZE_BYTES = 5_000_000
@@ -242,6 +244,14 @@ class CrawlBlueprint(BaseModel):
         default_factory=dict,
         description="Headers attached to start and follow-up requests.",
     )
+    user_agents: list[str] = Field(
+        default_factory=list,
+        description="Optional user-agent pool used by UserAgentMiddleware.",
+    )
+    default_user_agent: str | None = Field(
+        default="silkworm-mcp/0.1.0",
+        description="Fallback user-agent for UserAgentMiddleware.",
+    )
     item_selector: str | None = Field(
         default=None,
         description="CSS selector for per-item containers.",
@@ -306,6 +316,44 @@ class CrawlBlueprint(BaseModel):
         le=300,
         description="Per-request timeout in seconds.",
     )
+    delay_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=300,
+        description="Fixed delay inserted before requests.",
+    )
+    delay_min_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=300,
+        description="Minimum randomized request delay.",
+    )
+    delay_max_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=300,
+        description="Maximum randomized request delay.",
+    )
+    retry_max_times: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        description="Retry attempts configured through RetryMiddleware.",
+    )
+    retry_http_codes: list[int] = Field(
+        default_factory=list,
+        description="HTTP status codes retried immediately.",
+    )
+    sleep_http_codes: list[int] = Field(
+        default_factory=lambda: [403, 429],
+        description="HTTP status codes that trigger backoff sleep before retrying.",
+    )
+    retry_backoff_base: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=300,
+        description="Base backoff delay for RetryMiddleware.",
+    )
     html_max_size_bytes: int = Field(
         default=DEFAULT_HTML_MAX_SIZE_BYTES,
         ge=1_024,
@@ -326,6 +374,18 @@ class CrawlBlueprint(BaseModel):
         default=True,
         description="Include _source_url on emitted items.",
     )
+    output_jsonl_path: str | None = Field(
+        default=None,
+        description="Optional JSON Lines output path for generated spider templates.",
+    )
+    output_use_opendal: bool | None = Field(
+        default=None,
+        description="Optional JsonLinesPipeline use_opendal flag for generated templates.",
+    )
+    use_uvloop_runner: bool = Field(
+        default=True,
+        description="Generate templates with run_spider_uvloop instead of run_spider.",
+    )
 
     @model_validator(mode="after")
     def validate_blueprint(self) -> "CrawlBlueprint":
@@ -344,6 +404,23 @@ class CrawlBlueprint(BaseModel):
             self.follow_links_xpath,
             "follow_links_selector/follow_links_xpath",
         )
+        if (
+            self.delay_seconds is not None
+            and (self.delay_min_seconds is not None or self.delay_max_seconds is not None)
+        ):
+            raise ValueError(
+                "Use either delay_seconds or delay_min_seconds/delay_max_seconds, not both."
+            )
+        if (self.delay_min_seconds is None) != (self.delay_max_seconds is None):
+            raise ValueError(
+                "delay_min_seconds and delay_max_seconds must be set together."
+            )
+        if (
+            self.delay_min_seconds is not None
+            and self.delay_max_seconds is not None
+            and self.delay_min_seconds > self.delay_max_seconds
+        ):
+            raise ValueError("delay_min_seconds must be <= delay_max_seconds.")
         return self
 
 
@@ -761,6 +838,35 @@ class _CollectItemsPipeline:
         return item
 
 
+def _build_runtime_request_middlewares(
+    blueprint: CrawlBlueprint,
+) -> list[UserAgentMiddleware | DelayMiddleware]:
+    return [
+        UserAgentMiddleware(
+            blueprint.user_agents or None,
+            default=blueprint.default_user_agent,
+        ),
+        DelayMiddleware(
+            delay=blueprint.delay_seconds,
+            min_delay=blueprint.delay_min_seconds,
+            max_delay=blueprint.delay_max_seconds,
+        ),
+    ]
+
+
+def _build_runtime_response_middlewares(
+    blueprint: CrawlBlueprint,
+) -> list[RetryMiddleware]:
+    return [
+        RetryMiddleware(
+            max_times=blueprint.retry_max_times,
+            retry_http_codes=blueprint.retry_http_codes or None,
+            backoff_base=blueprint.retry_backoff_base,
+            sleep_http_codes=blueprint.sleep_http_codes or None,
+        )
+    ]
+
+
 def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
     safe_class_name = _normalize_identifier(class_name)
     blueprint_literal = pformat(
@@ -768,13 +874,16 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
         sort_dicts=False,
         width=88,
     )
+    runner_name = "run_spider_uvloop" if blueprint.use_uvloop_runner else "run_spider"
     return dedent(
         f"""
         from __future__ import annotations
 
         from urllib.parse import urljoin
 
-        from silkworm import HTMLResponse, Request, Spider, run_spider
+        from silkworm import HTMLResponse, Request, Spider, {runner_name}
+        from silkworm.middlewares import DelayMiddleware, RetryMiddleware, UserAgentMiddleware
+        from silkworm.pipelines import JsonLinesPipeline
 
 
         BLUEPRINT = {blueprint_literal}
@@ -904,8 +1013,40 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
 
 
         if __name__ == "__main__":
-            run_spider(
+            request_mw = [
+                UserAgentMiddleware(
+                    BLUEPRINT.get("user_agents") or None,
+                    default=BLUEPRINT.get("default_user_agent"),
+                ),
+                DelayMiddleware(
+                    delay=BLUEPRINT.get("delay_seconds"),
+                    min_delay=BLUEPRINT.get("delay_min_seconds"),
+                    max_delay=BLUEPRINT.get("delay_max_seconds"),
+                ),
+            ]
+            response_mw = [
+                RetryMiddleware(
+                    max_times=BLUEPRINT.get("retry_max_times", 3),
+                    retry_http_codes=BLUEPRINT.get("retry_http_codes") or None,
+                    backoff_base=BLUEPRINT.get("retry_backoff_base", 0.5),
+                    sleep_http_codes=BLUEPRINT.get("sleep_http_codes") or None,
+                )
+            ]
+            pipelines = []
+            output_path = BLUEPRINT.get("output_jsonl_path")
+            if output_path:
+                pipelines.append(
+                    JsonLinesPipeline(
+                        output_path,
+                        use_opendal=BLUEPRINT.get("output_use_opendal"),
+                    )
+                )
+
+            {runner_name}(
                 {safe_class_name},
+                request_middlewares=request_mw,
+                response_middlewares=response_mw,
+                item_pipelines=pipelines,
                 concurrency=BLUEPRINT["concurrency"],
                 request_timeout=BLUEPRINT.get("request_timeout_seconds"),
                 max_pending_requests=BLUEPRINT.get("max_pending_requests"),
@@ -1439,6 +1580,8 @@ async def run_crawl_blueprint(blueprint: CrawlBlueprint) -> CrawlRunResult:
         max_pending_requests=blueprint.max_pending_requests,
         request_timeout=blueprint.request_timeout_seconds,
         html_max_size_bytes=blueprint.html_max_size_bytes,
+        request_middlewares=_build_runtime_request_middlewares(blueprint),
+        response_middlewares=_build_runtime_response_middlewares(blueprint),
         item_pipelines=[collector],
         log_stats_interval=blueprint.log_stats_interval,
         keep_alive=blueprint.keep_alive,
