@@ -31,6 +31,7 @@ COPY mcp_server.py ./
 COPY docker-entrypoint.sh ./
 RUN uv sync --frozen --no-dev
 RUN chmod 0755 /app/docker-entrypoint.sh
+RUN chown -R app:app /app
 
 USER app
 
