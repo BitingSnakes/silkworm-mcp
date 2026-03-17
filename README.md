@@ -103,38 +103,6 @@ Useful built-in MCP references:
 - `silkworm://reference/scraper-rs-cheatsheet`
 - `silkworm://reference/crawl-blueprint-schema`
 
-## Blueprint Example
-
-```json
-{
-  "spider_name": "products_spider",
-  "start_urls": ["https://example.com/products"],
-  "transport": "cdp",
-  "cdp_ws_endpoint": "ws://127.0.0.1:9222",
-  "item_selector": ".product-card",
-  "pagination_selector": "a.next",
-  "fields": [
-    {
-      "name": "title",
-      "css": ".title",
-      "extractor": "text"
-    },
-    {
-      "name": "price",
-      "css": ".price",
-      "extractor": "text"
-    },
-    {
-      "name": "detail_url",
-      "css": "a",
-      "extractor": "attr",
-      "attr_name": "href",
-      "absolute_url": true
-    }
-  ]
-}
-```
-
 Use `transport: "cdp"` when pages require JavaScript rendering. `run_crawl_blueprint` will connect to the configured CDP endpoint, and `generate_spider_template` will emit a starter spider that runs through `CDPClient` instead of the default HTTP client.
 
 Both `run_crawl_blueprint` and `generate_spider_template` accept a `variant` override. When omitted, they infer a crawl style from the blueprint:
@@ -146,31 +114,14 @@ Both `run_crawl_blueprint` and `generate_spider_template` accept a `variant` ove
 
 `run_crawl_blueprint` returns the resolved `execution_variant`, and `generate_spider_template` returns the resolved `template_variant`, so clients can see which crawl shape was actually used.
 
-## Local Demo
-
-`mcp_test.py` is a transport-free smoke test that exercises the exported server functions and schema models:
-
-- document storage
-- selector querying
-- spider template generation
-
-Run it with:
-
-```bash
-uv run python mcp_test.py
-```
-
 ## Testing
 
 Run the automated test suite with:
 
 ```bash
-uv run --group dev pytest
+just test
 ```
 
-## Production Notes
+## Acknowledgement
 
-- Use `server_status` or the `silkworm://status` resource to inspect cache usage, uptime, and runtime configuration.
-- The document cache is bounded by count, total bytes, and idle TTL so long-running HTTP deployments do not grow unbounded.
-- `compose.yml` publishes only the MCP HTTP port; the Lightpanda CDP port stays internal to the container.
-- The generated CDP spider template and `run_crawl_blueprint` now close CDP clients explicitly on shutdown.
+This project builds on the excellent work behind [FastMCP](https://github.com/jlowin/fastmcp), [silkworm-rs](https://github.com/BitingSnakes/silkworm), and [scraper-rs](https://github.com/RustedBytes/scraper-rs). Together they provide the MCP server framework, crawling runtime, and HTML parsing foundations that make this project possible.

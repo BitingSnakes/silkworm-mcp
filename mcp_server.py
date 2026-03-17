@@ -52,41 +52,37 @@ PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 SERVER_INSTRUCTIONS = dedent(
     """
-    Use this server to build, debug, and validate web scrapers with silkworm-rs and scraper-rs.
-    It is designed for iterative, LLM-guided scraper development and returns structured results
-    that closely mirror real silkworm and scraper-rs behavior.
+    Use this server to design, debug, and validate scrapers built with silkworm and scraper-rs.
+    Treat it as an interactive scraper workbench: fetch pages, inspect structure, test selectors,
+    prove the crawl shape, and only then generate or validate spider code.
 
     Core capabilities:
-    - Fetch pages with silkworm over HTTP (`silkworm_fetch`) or a rendered browser session (`silkworm_fetch_cdp`).
-    - Cache HTML documents in the server-side document store and reuse them via `document_handle`.
-    - Inspect DOM structure, parse HTML into node trees, query CSS/XPath selectors, compare competing selectors,
-      prettify HTML, and extract links before committing to a crawl.
-    - Run ad hoc crawls from a `CrawlBlueprint`, generate starter spider code, and validate that code.
+    - Fetch pages over normal HTTP with `silkworm_fetch` or a rendered browser session with `silkworm_fetch_cdp`.
+    - Cache fetched HTML in the document store and reuse it through `document_handle`.
+    - Inspect DOM structure, parse HTML into node trees, test CSS/XPath selectors, compare alternatives,
+      prettify markup, and extract links before committing to crawl logic.
+    - Run ad hoc crawls from a `CrawlBlueprint`, generate starter spider code, and validate generated code.
 
     Recommended workflow:
-    1. Start with `silkworm_fetch` for normal pages or `silkworm_fetch_cdp` for JavaScript-heavy pages.
-    2. Reuse the returned `document_handle` instead of resending large HTML blobs.
-    3. Call `inspect_document` to understand page structure and text density.
-    4. Use `parse_html_document` or `parse_html_fragment` when parser-level structure matters.
-    5. Refine selectors with `query_selector`, `compare_selectors`, `extract_links`, and `prettify_document`.
-    6. If rendered DOM behavior matters, validate against live browser output with `query_selector_cdp`
-       or `extract_structured_data_cdp`.
-    7. Once the extraction plan is stable, use `run_crawl_blueprint` for a live crawl and
-       `generate_spider_template` plus `validate_spider_code` for production starter code.
+    1. Fetch one representative page with `silkworm_fetch`.
+    2. Switch to `silkworm_fetch_cdp` only if important content is missing, delayed, or clearly render-dependent.
+    3. Reuse the returned `document_handle` instead of resending raw HTML.
+    4. Inspect the page with `inspect_document`, then use `parse_html_document` or `parse_html_fragment` when parser-level structure matters.
+    5. Refine extraction with `query_selector`, `compare_selectors`, `extract_links`, and `prettify_document`.
+    6. Validate pagination and detail-link behavior on a small sample before scaling the crawl.
+    7. Once the extraction plan is stable, run `run_crawl_blueprint`, then use `generate_spider_template` and `validate_spider_code`.
 
     Operating guidance:
     - Prefer `document_handle`-based workflows to reduce token usage and avoid repeating large inputs.
-    - Use CSS selectors by default unless XPath is clearly a better fit.
-    - Verify pagination, detail-page links, and field extraction on a small sample before scaling up.
-    - When generating code, keep the crawl blueprint aligned with the selectors already validated interactively.
-    - Treat silkworm as an async Spider/Request/Response framework: `parse()` yields items and follow-up `Request`s.
-    - Default to guarding `parse()` with `isinstance(response, HTMLResponse)` unless the crawl intentionally accepts XML/JSON/binary responses.
-    - Prefer `response.follow(...)` for pagination/detail links so callbacks, relative URLs, and headers stay consistent.
-    - Use `UserAgentMiddleware`, `RetryMiddleware`, `DelayMiddleware`, and `SkipNonHTMLMiddleware` deliberately based on the target site's behavior.
-    - Prefer page-level list extraction first; only follow detail links when key fields are absent from listing pages.
-    - For JavaScript-heavy pages, switch to CDP only after plain HTTP validation suggests rendered DOM differences or missing content.
+    - Use CSS selectors by default; switch to XPath only when structure or text relationships make it clearly better.
+    - Keep selectors relative to the item container whenever possible.
+    - Prefer list-page extraction first; only follow detail links when key fields are missing from listings.
+    - Treat silkworm as an async Spider/Request/Response framework where `parse()` yields items and follow-up `Request`s.
+    - Guard selector-heavy parsing with `isinstance(response, HTMLResponse)` unless the crawl intentionally accepts XML, JSON, or binary responses.
+    - Prefer `response.follow(...)` for pagination and detail links so callbacks, relative URLs, and headers stay consistent.
+    - Choose middleware deliberately: `UserAgentMiddleware` by default, `RetryMiddleware` for transient failures, `DelayMiddleware` for rate-sensitive targets, and `SkipNonHTMLMiddleware` for normal HTML crawls.
     - Keep generated spiders production-oriented: bounded `max_requests`, bounded `max_items`, explicit timeouts, and optional JSON Lines output.
-    - When extracting repeated fields, use `all_matches=true`; for links set `extractor="attr"` plus `attr_name="href"` and usually `absolute_url=true`.
+    - For repeated fields use `all_matches=true`; for links use `extractor="attr"`, `attr_name="href"`, and usually `absolute_url=true`.
     - Include `_source_url` on items unless there is a strong reason not to, because it simplifies crawl debugging and downstream validation.
     """
 ).strip()
@@ -3650,29 +3646,30 @@ def document_html_resource(handle: str) -> str:
 def plan_silkworm_scraper(goal: str, target_url: str | None = None) -> str:
     return dedent(
         f"""
-        Build a scraper plan for this goal: {goal}
+        Build a concrete silkworm scraper plan for this goal:
+        {goal}
 
         Target URL: {target_url or "not provided"}
 
-        Use the silkworm MCP workflow:
-        1. Fetch or inspect the target page.
-        2. Use `parse_html_document` or `parse_html_fragment` when parser-level structure matters.
-        3. Identify stable item containers and field selectors.
-        4. Validate competing selectors with compare_selectors.
-        5. Detect pagination and detail links.
-        6. Use `transport="cdp"` for JavaScript-rendered pages that need a CDP browser.
-        7. Produce a CrawlBlueprint and, if helpful, a spider template.
+        Work in this order:
+        1. Choose the first page to inspect and say whether plain HTTP or CDP should be tried first.
+        2. Identify the likely item container, field selectors, pagination selector, and any detail-page links.
+        3. Call out which MCP tools should be used to validate each assumption.
+        4. Decide whether the crawl should be list-only, list-detail, sitemap-driven, or CDP-heavy.
+        5. Produce a draft `CrawlBlueprint` shape with the important fields and runtime limits.
+        6. Note whether generating a spider template is appropriate yet or should wait for more selector validation.
 
-        Apply silkworm-specific rules:
+        Apply these silkworm rules:
         - Prefer HTTP before CDP; switch only when the rendered DOM materially changes extraction.
-        - Keep selectors relative to the item scope.
-        - Use `extractor="attr"` with `attr_name="href"` and `absolute_url=true` for navigational links.
-        - Use `all_matches=true` for repeated fields like tags or categories.
+        - Keep selectors relative to the item scope instead of page-wide when possible.
+        - Use `extractor="attr"` with `attr_name="href"` and usually `absolute_url=true` for navigational links.
+        - Use `all_matches=true` for repeated fields such as tags, categories, breadcrumbs, or image lists.
         - Avoid detail-page crawling if listing pages already contain the required fields.
         - Plan for `UserAgentMiddleware`, `RetryMiddleware`, and usually `SkipNonHTMLMiddleware`.
-        - Keep `max_requests`, `max_items`, `concurrency`, and `request_timeout_seconds` explicit.
+        - Keep `max_requests`, `max_items`, `concurrency`, and `request_timeout_seconds` explicit while prototyping.
 
         Prefer document handles over repeatedly embedding raw HTML.
+        Be specific and operational: name the tools, selectors to verify, and likely blueprint fields.
         """
     ).strip()
 
@@ -3685,23 +3682,26 @@ def debug_selector_strategy(
 ) -> str:
     return dedent(
         f"""
-        Debug this selector strategy for a scraper.
+        Debug this selector strategy for a scraper and propose a safer extraction approach.
 
         Extraction goal: {extraction_goal}
         Current selector: {current_selector or "not provided"}
         Mode: {mode.value}
 
-        Use these MCP tools in order:
-        - inspect_document
-        - parse_html_document or parse_html_fragment when DOM structure is ambiguous
-        - query_selector
-        - compare_selectors
-        - query_selector_cdp for JS-rendered pages
-        - extract_links if navigation is involved
+        Use this workflow:
+        1. Inspect the page structure with `inspect_document`.
+        2. Use `parse_html_document` or `parse_html_fragment` when the DOM structure is ambiguous.
+        3. Test the current selector with `query_selector`.
+        4. Compare alternatives with `compare_selectors`.
+        5. Use `query_selector_cdp` if the page appears render-dependent.
+        6. Use `extract_links` if the extraction goal involves pagination or detail navigation.
 
-        Prefer selectors that are specific enough to avoid false positives but resilient to layout changes.
-        Favor selectors relative to each item container instead of brittle page-wide selectors.
-        If the selected nodes are links or assets, verify whether `attr("href")` or `attr("src")` is the real target value.
+        Evaluate the selector strategy against these criteria:
+        - Match the intended nodes without obvious false positives.
+        - Stay resilient to layout shifts and presentational wrapper changes.
+        - Prefer selectors scoped to each item container instead of brittle page-wide selectors.
+        - For links or assets, verify whether `attr("href")` or `attr("src")` is the real target value.
+        - If the current selector is weak, suggest 2 or 3 stronger alternatives and explain the tradeoffs briefly.
         """
     ).strip()
 
