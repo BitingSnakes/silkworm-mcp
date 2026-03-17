@@ -7,6 +7,8 @@ This is a full-featured MCP server for building scrapers with:
 
 It is designed for LLM-assisted scraper development, so the server exposes both low-level page inspection tools and higher-level workflow helpers for validating selector plans and generating starter spider code.
 
+An example: https://github.com/BitingSnakes/silkworm-example
+
 ## Features
 
 - Fetch pages through silkworm's regular HTTP client or CDP renderer.
