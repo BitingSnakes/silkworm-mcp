@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "silkworm-mcp"
 version = "0.1.0"
@@ -13,6 +17,9 @@ dependencies = [
 
 [project.scripts]
 silkworm-mcp = "mcp_server:main"
+
+[tool.setuptools]
+py-modules = ["mcp_server"]
 
 [dependency-groups]
 dev = [
