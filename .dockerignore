@@ -6,3 +6,5 @@
 __pycache__
 *.pyc
 tests
+dist
+silkworm_mcp.egg-info
