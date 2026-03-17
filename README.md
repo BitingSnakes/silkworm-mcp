@@ -1,6 +1,6 @@
 # silkworm-mcp
 
-`silkworm-mcp` is a full-featured MCP server for building scrapers with:
+This is a full-featured MCP server for building scrapers with:
 
 - [silkworm-rs](https://github.com/BitingSnakes/silkworm): async crawling, fetching, follow links, and spider execution
 - [scraper-rs](https://github.com/RustedBytes/scraper-rs): fast Rust-backed HTML parsing with CSS and XPath selectors
