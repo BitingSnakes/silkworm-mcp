@@ -24,6 +24,9 @@ format:
 test:
     uv run --group dev pytest
 
+test-e2e:
+    uv run --group dev pytest tests/test_e2e.py
+
 test-file path:
     uv run --group dev pytest {{path}}
 
