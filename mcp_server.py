@@ -29,18 +29,32 @@ DEFAULT_HTML_PREVIEW_CHARS = 1_500
 
 SERVER_INSTRUCTIONS = dedent(
     """
-    Use this server to build, debug, and validate scrapers with silkworm-rs and scraper-rs.
+    Use this server to build, debug, and validate web scrapers with silkworm-rs and scraper-rs.
+    It is designed for iterative, LLM-guided scraper development and returns structured results
+    that closely mirror real silkworm and scraper-rs behavior.
+
+    Core capabilities:
+    - Fetch pages with silkworm over HTTP (`silkworm_fetch`) or a rendered browser session (`silkworm_fetch_cdp`).
+    - Cache HTML documents in memory and reuse them via `document_handle`.
+    - Inspect DOM structure, query CSS/XPath selectors, compare competing selectors, prettify HTML,
+      and extract links before committing to a crawl.
+    - Run ad hoc crawls from a `CrawlBlueprint`, generate starter spider code, and validate that code.
 
     Recommended workflow:
-    1. Fetch a page with `silkworm_fetch` or `silkworm_fetch_cdp`, or save raw HTML with `store_html_document`.
+    1. Start with `silkworm_fetch` for normal pages or `silkworm_fetch_cdp` for JavaScript-heavy pages.
     2. Reuse the returned `document_handle` instead of resending large HTML blobs.
-    3. Inspect the page with `inspect_document`, then iterate on selectors with `query_selector`,
-       `compare_selectors`, `extract_links`, and `prettify_document`.
-    4. When selectors are stable, either run an ad hoc crawl with `run_crawl_blueprint`
-       or generate production starter code with `generate_spider_template`.
+    3. Call `inspect_document` to understand page structure and text density.
+    4. Refine selectors with `query_selector`, `compare_selectors`, `extract_links`, and `prettify_document`.
+    5. If rendered DOM behavior matters, validate against live browser output with `query_selector_cdp`
+       or `extract_structured_data_cdp`.
+    6. Once the extraction plan is stable, use `run_crawl_blueprint` for a live crawl and
+       `generate_spider_template` plus `validate_spider_code` for production starter code.
 
-    This server is optimized for LLM-guided scraper development and returns structured results
-    that mirror how silkworm and scraper-rs actually behave.
+    Operating guidance:
+    - Prefer `document_handle`-based workflows to reduce token usage and avoid repeating large inputs.
+    - Use CSS selectors by default unless XPath is clearly a better fit.
+    - Verify pagination, detail-page links, and field extraction on a small sample before scaling up.
+    - When generating code, keep the crawl blueprint aligned with the selectors already validated interactively.
     """
 ).strip()
 
@@ -48,7 +62,7 @@ mcp = FastMCP(
     "silkworm-mcp",
     instructions=SERVER_INSTRUCTIONS,
     version=SERVER_VERSION,
-    website_url="https://github.com/BitingSnakes/silkworm",
+    website_url="https://github.com/BitingSnakes/silkworm-mcp",
 )
 
 
