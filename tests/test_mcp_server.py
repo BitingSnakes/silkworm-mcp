@@ -100,6 +100,49 @@ def test_query_selector_still_returns_expected_matches() -> None:
     assert result.matches[0].text == "Widget A"
 
 
+def test_document_store_persists_handles_across_store_instances(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "documents.sqlite3"
+    first_store = DocumentStore(
+        max_document_count=16,
+        max_total_bytes=1_000_000,
+        ttl_seconds=3600,
+        store_path=str(store_path),
+    )
+    second_store = DocumentStore(
+        max_document_count=16,
+        max_total_bytes=1_000_000,
+        ttl_seconds=3600,
+        store_path=str(store_path),
+    )
+
+    stored = first_store.add(
+        SAMPLE_HTML,
+        source_url="https://example.com/catalog",
+        label="shared-doc",
+    )
+
+    loaded = second_store.get(stored.handle)
+    listed = second_store.list()
+
+    assert loaded.handle == stored.handle
+    assert loaded.html == SAMPLE_HTML
+    assert loaded.source_url == "https://example.com/catalog"
+    assert listed[0].handle == stored.handle
+
+
+def test_query_selector_error_mentions_rehydrating_html() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        query_selector(
+            document_handle="missing-handle",
+            query=".product .name",
+            mode=SelectorMode.css,
+        )
+
+    assert "fetch/store the HTML again" in str(exc_info.value)
+
+
 def test_parse_html_document_returns_structured_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

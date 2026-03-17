@@ -12,8 +12,8 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - Fetch pages through silkworm's regular HTTP client or CDP renderer.
 - Query selectors directly against a CDP-rendered DOM snapshot.
 - Extract structured records from live rendered pages before committing to a full crawl.
-- Cache HTML in-memory and reuse it via `document_handle`.
-- Bound the in-memory cache with max-document, max-bytes, and idle-TTL controls.
+- Cache HTML in a local document store and reuse it via `document_handle`.
+- Bound the document cache with max-document, max-bytes, and idle-TTL controls.
 - Inspect pages with summaries, parsed DOM trees, prettified HTML, CSS/XPath queries, selector comparisons, and link extraction.
 - Run ad hoc crawls from a structured `CrawlBlueprint`.
 - Generate reusable silkworm spider templates from the same blueprint and statically validate them, including pattern-specific variants for list-only, list+detail, sitemap/XML, and CDP-heavy crawls.
@@ -78,6 +78,7 @@ Key runtime environment variables:
 - `SILKWORM_MCP_DOCUMENT_MAX_COUNT`
 - `SILKWORM_MCP_DOCUMENT_MAX_TOTAL_BYTES`
 - `SILKWORM_MCP_DOCUMENT_TTL_SECONDS`
+- `SILKWORM_MCP_DOCUMENT_STORE_PATH`
 - `SILKWORM_MCP_LOG_LEVEL`
 - `SILKWORM_MCP_READINESS_REQUIRE_CDP`
 - `SILKWORM_MCP_READINESS_CDP_WS_ENDPOINT`

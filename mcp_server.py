@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import xml.etree.ElementTree as ET
 import uuid
@@ -41,6 +42,7 @@ DEFAULT_HTML_PREVIEW_CHARS = 1_500
 DEFAULT_DOCUMENT_MAX_COUNT = 128
 DEFAULT_DOCUMENT_MAX_TOTAL_BYTES = 32_000_000
 DEFAULT_DOCUMENT_TTL_SECONDS = 3_600.0
+DEFAULT_DOCUMENT_STORE_PATH = "/tmp/silkworm-mcp-documents.sqlite3"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_HTTP_HEALTH_PATH = "/healthz"
 DEFAULT_HTTP_READY_PATH = "/readyz"
@@ -56,7 +58,7 @@ SERVER_INSTRUCTIONS = dedent(
 
     Core capabilities:
     - Fetch pages with silkworm over HTTP (`silkworm_fetch`) or a rendered browser session (`silkworm_fetch_cdp`).
-    - Cache HTML documents in memory and reuse them via `document_handle`.
+    - Cache HTML documents in the server-side document store and reuse them via `document_handle`.
     - Inspect DOM structure, parse HTML into node trees, query CSS/XPath selectors, compare competing selectors,
       prettify HTML, and extract links before committing to a crawl.
     - Run ad hoc crawls from a `CrawlBlueprint`, generate starter spider code, and validate that code.
@@ -126,6 +128,7 @@ class ServerSettings(BaseModel):
         ge=0.1,
         le=604_800,
     )
+    document_store_path: str | None = DEFAULT_DOCUMENT_STORE_PATH
     log_level: str = DEFAULT_LOG_LEVEL
     mask_error_details: bool = True
     strict_input_validation: bool = True
@@ -238,6 +241,10 @@ def _load_server_settings() -> ServerSettings:
             "SILKWORM_MCP_DOCUMENT_TTL_SECONDS",
             DEFAULT_DOCUMENT_TTL_SECONDS,
         ),
+        "document_store_path": _env_optional_str(
+            "SILKWORM_MCP_DOCUMENT_STORE_PATH",
+            DEFAULT_DOCUMENT_STORE_PATH,
+        ),
         "log_level": os.getenv("SILKWORM_MCP_LOG_LEVEL", DEFAULT_LOG_LEVEL),
         "mask_error_details": _env_bool("SILKWORM_MCP_MASK_ERROR_DETAILS", True),
         "strict_input_validation": _env_bool(
@@ -328,6 +335,7 @@ class ServerConfigurationSummary(BaseModel):
     document_max_count: int
     document_max_total_bytes: int
     document_ttl_seconds: float | None = None
+    document_store_path: str | None = None
 
 
 class ServerHealthReport(BaseModel):
@@ -840,17 +848,71 @@ class DocumentStore:
         max_document_count: int,
         max_total_bytes: int,
         ttl_seconds: float | None,
+        store_path: str | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._documents: dict[str, StoredDocument] = {}
         self._max_document_count = max_document_count
         self._max_total_bytes = max_total_bytes
         self._ttl_seconds = ttl_seconds
+        self._store_path = store_path
         self._total_bytes = 0
         self._created_documents = 0
         self._evicted_documents = 0
         self._expired_documents = 0
         self._rejected_documents = 0
+        if self._store_path:
+            directory = os.path.dirname(self._store_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            self._initialize_persistent_store()
+
+    def _initialize_persistent_store(self) -> None:
+        assert self._store_path is not None
+        with sqlite3.connect(self._store_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS documents (
+                    handle TEXT PRIMARY KEY,
+                    html TEXT NOT NULL,
+                    html_bytes INTEGER NOT NULL,
+                    label TEXT,
+                    source_url TEXT,
+                    stored_at TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    fetched_via TEXT,
+                    status INTEGER,
+                    headers_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_documents_last_accessed
+                ON documents(last_accessed_at, stored_at, handle)
+                """
+            )
+            connection.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        assert self._store_path is not None
+        connection = sqlite3.connect(self._store_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _document_from_row(self, row: sqlite3.Row) -> StoredDocument:
+        return StoredDocument(
+            handle=str(row["handle"]),
+            html=str(row["html"]),
+            html_bytes=int(row["html_bytes"]),
+            label=row["label"],
+            source_url=row["source_url"],
+            stored_at=datetime.fromisoformat(str(row["stored_at"])),
+            last_accessed_at=datetime.fromisoformat(str(row["last_accessed_at"])),
+            fetched_via=row["fetched_via"],
+            status=row["status"],
+            headers=json.loads(str(row["headers_json"])) if row["headers_json"] else {},
+        )
 
     def _is_expired(self, document: StoredDocument, now: datetime) -> bool:
         expires_at = document.expires_at(self._ttl_seconds)
@@ -873,6 +935,20 @@ class DocumentStore:
         return document
 
     def _prune_expired_locked(self, now: datetime) -> None:
+        if self._store_path:
+            if self._ttl_seconds is None:
+                return
+            cutoff = (now - timedelta(seconds=self._ttl_seconds)).isoformat()
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "DELETE FROM documents WHERE last_accessed_at <= ?",
+                    (cutoff,),
+                )
+                deleted = int(cursor.rowcount or 0)
+                if deleted:
+                    self._expired_documents += deleted
+                connection.commit()
+            return
         expired_handles = [
             handle
             for handle, document in self._documents.items()
@@ -882,6 +958,25 @@ class DocumentStore:
             self._remove_document_locked(handle, reason="expired")
 
     def _evict_one_locked(self) -> bool:
+        if self._store_path:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT handle
+                    FROM documents
+                    ORDER BY last_accessed_at ASC, stored_at ASC, handle ASC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row is None:
+                    return False
+                connection.execute(
+                    "DELETE FROM documents WHERE handle = ?",
+                    (str(row["handle"]),),
+                )
+                connection.commit()
+            self._evicted_documents += 1
+            return True
         if not self._documents:
             return False
         handle, _document = min(
@@ -927,6 +1022,61 @@ class DocumentStore:
             status=status,
             headers=dict(headers or {}),
         )
+        if self._store_path:
+            with self._lock:
+                self._prune_expired_locked(now)
+                with self._connect() as connection:
+                    while True:
+                        row = connection.execute(
+                            """
+                            SELECT COUNT(*) AS document_count,
+                                   COALESCE(SUM(html_bytes), 0) AS total_bytes
+                            FROM documents
+                            """
+                        ).fetchone()
+                        assert row is not None
+                        document_count = int(row["document_count"])
+                        total_bytes = int(row["total_bytes"])
+                        if (
+                            document_count < self._max_document_count
+                            and total_bytes + document.html_bytes
+                            <= self._max_total_bytes
+                        ):
+                            break
+                        if not self._evict_one_locked():
+                            break
+                    connection.execute(
+                        """
+                        INSERT INTO documents (
+                            handle,
+                            html,
+                            html_bytes,
+                            label,
+                            source_url,
+                            stored_at,
+                            last_accessed_at,
+                            fetched_via,
+                            status,
+                            headers_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            document.handle,
+                            document.html,
+                            document.html_bytes,
+                            document.label,
+                            document.source_url,
+                            document.stored_at.isoformat(),
+                            document.last_accessed_at.isoformat(),
+                            document.fetched_via,
+                            document.status,
+                            json.dumps(document.headers),
+                        ),
+                    )
+                    connection.commit()
+                self._created_documents += 1
+            return document
         with self._lock:
             self._prune_expired_locked(now)
             while (
@@ -941,6 +1091,25 @@ class DocumentStore:
         return document
 
     def get(self, handle: str) -> StoredDocument:
+        if self._store_path:
+            with self._lock:
+                now = datetime.now(timezone.utc)
+                self._prune_expired_locked(now)
+                with self._connect() as connection:
+                    row = connection.execute(
+                        "SELECT * FROM documents WHERE handle = ?",
+                        (handle,),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(f"Unknown document handle: {handle}")
+                    connection.execute(
+                        "UPDATE documents SET last_accessed_at = ? WHERE handle = ?",
+                        (now.isoformat(), handle),
+                    )
+                    connection.commit()
+                document = self._document_from_row(row)
+                document.touch(now)
+            return document
         with self._lock:
             now = datetime.now(timezone.utc)
             self._prune_expired_locked(now)
@@ -952,6 +1121,18 @@ class DocumentStore:
         return document
 
     def list(self) -> list[StoredDocument]:
+        if self._store_path:
+            with self._lock:
+                self._prune_expired_locked(datetime.now(timezone.utc))
+                with self._connect() as connection:
+                    rows = connection.execute(
+                        """
+                        SELECT *
+                        FROM documents
+                        ORDER BY last_accessed_at DESC, stored_at DESC, handle DESC
+                        """
+                    ).fetchall()
+            return [self._document_from_row(row) for row in rows]
         with self._lock:
             self._prune_expired_locked(datetime.now(timezone.utc))
             documents = list(self._documents.values())
@@ -966,10 +1147,29 @@ class DocumentStore:
         return documents
 
     def delete(self, handle: str) -> bool:
+        if self._store_path:
+            with self._lock:
+                with self._connect() as connection:
+                    cursor = connection.execute(
+                        "DELETE FROM documents WHERE handle = ?",
+                        (handle,),
+                    )
+                    connection.commit()
+                return bool(cursor.rowcount)
         with self._lock:
             return self._remove_document_locked(handle) is not None
 
     def clear(self) -> int:
+        if self._store_path:
+            with self._lock:
+                with self._connect() as connection:
+                    row = connection.execute(
+                        "SELECT COUNT(*) AS document_count FROM documents"
+                    ).fetchone()
+                    deleted = int(row["document_count"]) if row is not None else 0
+                    connection.execute("DELETE FROM documents")
+                    connection.commit()
+                return deleted
         with self._lock:
             deleted = len(self._documents)
             self._documents.clear()
@@ -977,6 +1177,28 @@ class DocumentStore:
         return deleted
 
     def stats(self) -> DocumentStoreStats:
+        if self._store_path:
+            with self._lock:
+                self._prune_expired_locked(datetime.now(timezone.utc))
+                with self._connect() as connection:
+                    row = connection.execute(
+                        """
+                        SELECT COUNT(*) AS document_count,
+                               COALESCE(SUM(html_bytes), 0) AS total_bytes
+                        FROM documents
+                        """
+                    ).fetchone()
+            return DocumentStoreStats(
+                document_count=int(row["document_count"]) if row is not None else 0,
+                total_bytes=int(row["total_bytes"]) if row is not None else 0,
+                max_document_count=self._max_document_count,
+                max_total_bytes=self._max_total_bytes,
+                ttl_seconds=self._ttl_seconds,
+                created_documents=self._created_documents,
+                evicted_documents=self._evicted_documents,
+                expired_documents=self._expired_documents,
+                rejected_documents=self._rejected_documents,
+            )
         with self._lock:
             self._prune_expired_locked(datetime.now(timezone.utc))
             return DocumentStoreStats(
@@ -996,6 +1218,7 @@ DOCUMENT_STORE = DocumentStore(
     max_document_count=SERVER_SETTINGS.document_max_count,
     max_total_bytes=SERVER_SETTINGS.document_max_total_bytes,
     ttl_seconds=SERVER_SETTINGS.document_ttl_seconds,
+    store_path=SERVER_SETTINGS.document_store_path,
 )
 EMULATION_NAMES = sorted(name for name in dir(Emulation) if not name.startswith("_"))
 
@@ -1044,7 +1267,14 @@ def _resolve_document_input(
     if bool(document_handle) == bool(html):
         raise ValueError("Provide exactly one of 'document_handle' or 'html'.")
     if document_handle is not None:
-        document = DOCUMENT_STORE.get(document_handle)
+        try:
+            document = DOCUMENT_STORE.get(document_handle)
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc} The handle is looked up in the server-side document cache. "
+                "If it came from an earlier server process or expired, fetch/store the HTML again "
+                "or pass inline 'html' to this tool."
+            ) from exc
         return document.html, document
     assert html is not None
     return html, None
@@ -1129,6 +1359,7 @@ def _server_configuration_summary() -> ServerConfigurationSummary:
         document_max_count=SERVER_SETTINGS.document_max_count,
         document_max_total_bytes=SERVER_SETTINGS.document_max_total_bytes,
         document_ttl_seconds=SERVER_SETTINGS.document_ttl_seconds,
+        document_store_path=SERVER_SETTINGS.document_store_path,
     )
 
 
