@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 
 import scraper_rs
 
@@ -11,6 +12,8 @@ from mcp_server import (
     _extract_static_item,
     generate_spider_template,
     list_documents,
+    parse_html_document,
+    parse_html_fragment,
     query_selector,
     store_html_document,
     validate_spider_code,
@@ -71,6 +74,20 @@ def main() -> None:
     )
     print("selector matches:", query.total_matches)
     print("first match:", query.matches[0].text)
+
+    if hasattr(scraper_rs, "parse_document") and hasattr(scraper_rs, "parse_fragment"):
+        parsed_document = parse_html_document(document_handle=summary.handle)
+        print("parsed document root:", parsed_document.root.node_type)
+        print("parsed first child tag:", parsed_document.root.children[0].tag)
+
+        parsed_fragment = parse_html_fragment(html="<li><span>Fragment</span></li>")
+        print("parsed fragment root:", parsed_fragment.root.node_type)
+        print("parsed fragment child tag:", parsed_fragment.root.children[0].tag)
+    else:
+        print(
+            "parsed tree tools unavailable in installed scraper-rust:",
+            importlib.metadata.version("scraper-rust"),
+        )
 
     blueprint = CrawlBlueprint(
         spider_name="catalog_spider",

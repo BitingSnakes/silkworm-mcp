@@ -22,6 +22,8 @@ from mcp_server import (
     clear_documents,
     generate_spider_template,
     list_documents,
+    parse_html_document,
+    parse_html_fragment,
     query_selector,
     run_crawl_blueprint,
     server_status,
@@ -98,6 +100,125 @@ def test_query_selector_still_returns_expected_matches() -> None:
     assert result.matches[0].text == "Widget A"
 
 
+def test_parse_html_document_returns_structured_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int | None, bool]] = []
+
+    def fake_parse_document(
+        html: str,
+        *,
+        max_size_bytes: int | None = None,
+        truncate_on_limit: bool = False,
+    ) -> dict[str, object]:
+        calls.append((html, max_size_bytes, truncate_on_limit))
+        return {
+            "node_type": "document",
+            "quirks_mode": "no-quirks",
+            "children": [
+                {
+                    "node_type": "element",
+                    "tag": "html",
+                    "children": [
+                        {
+                            "node_type": "element",
+                            "tag": "body",
+                            "children": [
+                                {
+                                    "node_type": "element",
+                                    "tag": "p",
+                                    "attrs": {"class": "lead"},
+                                    "children": [
+                                        {"node_type": "text", "text": "Hello"}
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        mcp_server.scraper_rs,
+        "parse_document",
+        fake_parse_document,
+        raising=False,
+    )
+    summary = store_html_document(
+        html=SAMPLE_HTML,
+        source_url="https://example.com/catalog",
+    )
+
+    result = parse_html_document(
+        document_handle=summary.handle,
+        max_size_bytes=4096,
+        truncate_on_limit=True,
+    )
+
+    assert calls == [(SAMPLE_HTML, 4096, True)]
+    assert result.document_handle == summary.handle
+    assert result.source_url == "https://example.com/catalog"
+    assert result.parse_mode == "document"
+    assert result.root.node_type == "document"
+    assert result.root.children[0].tag == "html"
+    assert result.root.children[0].children[0].tag == "body"
+    assert result.root.children[0].children[0].children[0].attrs["class"] == "lead"
+    assert result.root.children[0].children[0].children[0].children[0].text == "Hello"
+
+
+def test_parse_html_fragment_returns_inline_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int | None, bool]] = []
+
+    def fake_parse_fragment(
+        html: str,
+        *,
+        max_size_bytes: int | None = None,
+        truncate_on_limit: bool = False,
+    ) -> dict[str, object]:
+        calls.append((html, max_size_bytes, truncate_on_limit))
+        return {
+            "node_type": "fragment",
+            "children": [
+                {
+                    "node_type": "element",
+                    "tag": "div",
+                    "attrs": {"data-kind": "card"},
+                    "children": [
+                        {"node_type": "comment", "data": "note"},
+                        {"node_type": "text", "text": "Widget"},
+                    ],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        mcp_server.scraper_rs,
+        "parse_fragment",
+        fake_parse_fragment,
+        raising=False,
+    )
+
+    result = parse_html_fragment(
+        html='<div data-kind="card"><!--note-->Widget</div>',
+        source_url="https://example.com/fragment",
+        max_size_bytes=None,
+        truncate_on_limit=False,
+    )
+
+    assert calls == [('<div data-kind="card"><!--note-->Widget</div>', None, False)]
+    assert result.document_handle is None
+    assert result.source_url == "https://example.com/fragment"
+    assert result.parse_mode == "fragment"
+    assert result.root.node_type == "fragment"
+    assert result.root.children[0].tag == "div"
+    assert result.root.children[0].children[0].data == "note"
+    assert result.root.children[0].children[1].text == "Widget"
+
+
 def test_document_store_evicts_least_recently_used_document() -> None:
     store = DocumentStore(
         max_document_count=2,
@@ -133,7 +254,9 @@ def test_document_store_expires_idle_documents() -> None:
     assert store.stats().expired_documents == 1
 
 
-def test_server_status_reports_runtime_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_server_status_reports_runtime_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(mcp_server.SERVER_SETTINGS, "readiness_require_cdp", False)
     summary = store_html_document(
         html=SAMPLE_HTML,
@@ -229,7 +352,9 @@ def test_run_crawl_blueprint_closes_cdp_client(monkeypatch: pytest.MonkeyPatch) 
     assert fake_client.closed is True
 
 
-def test_run_crawl_blueprint_reports_inferred_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_crawl_blueprint_reports_inferred_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeDefaultHTTP:
         async def close(self) -> None:
             return None
@@ -320,7 +445,9 @@ def test_run_crawl_blueprint_list_detail_variant_schedules_detail_requests(
         fields=[CrawlFieldSpec(name="name", css="h1")],
     )
 
-    asyncio.run(run_crawl_blueprint(blueprint, variant=SpiderTemplateVariant.list_detail))
+    asyncio.run(
+        run_crawl_blueprint(blueprint, variant=SpiderTemplateVariant.list_detail)
+    )
     spider = FakeEngine.instances[-1].spider
     response = HTMLResponse(
         url="https://example.com/catalog",

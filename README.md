@@ -14,7 +14,7 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - Extract structured records from live rendered pages before committing to a full crawl.
 - Cache HTML in-memory and reuse it via `document_handle`.
 - Bound the in-memory cache with max-document, max-bytes, and idle-TTL controls.
-- Inspect pages with summaries, prettified HTML, CSS/XPath queries, selector comparisons, and link extraction.
+- Inspect pages with summaries, parsed DOM trees, prettified HTML, CSS/XPath queries, selector comparisons, and link extraction.
 - Run ad hoc crawls from a structured `CrawlBlueprint`.
 - Generate reusable silkworm spider templates from the same blueprint and statically validate them, including pattern-specific variants for list-only, list+detail, sitemap/XML, and CDP-heavy crawls.
 - Expose MCP diagnostics plus HTTP `/healthz` and `/readyz` routes for production monitoring.
@@ -28,6 +28,8 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - `clear_documents`
 - `server_status`
 - `inspect_document`
+- `parse_html_document`
+- `parse_html_fragment`
 - `prettify_document`
 - `query_selector`
 - `compare_selectors`
@@ -84,11 +86,12 @@ Key runtime environment variables:
 
 1. Call `silkworm_fetch` for the target page.
 2. Use the returned `document_handle` with `inspect_document`.
-3. Iterate on `query_selector` and `compare_selectors`.
-4. For JS-heavy pages, use `query_selector_cdp` or `extract_structured_data_cdp` against the rendered DOM.
-5. Use `extract_links` to verify pagination or detail pages.
-6. Feed the stable plan into `run_crawl_blueprint`.
-7. Convert the same blueprint into code with `generate_spider_template`, then check it with `validate_spider_code`.
+3. Use `parse_html_document` or `parse_html_fragment` when you need exact parser structure, node types, or parser errors.
+4. Iterate on `query_selector` and `compare_selectors`.
+5. For JS-heavy pages, use `query_selector_cdp` or `extract_structured_data_cdp` against the rendered DOM.
+6. Use `extract_links` to verify pagination or detail pages.
+7. Feed the stable plan into `run_crawl_blueprint`.
+8. Convert the same blueprint into code with `generate_spider_template`, then check it with `validate_spider_code`.
 
 Useful built-in MCP references:
 

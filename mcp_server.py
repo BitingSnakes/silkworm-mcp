@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.metadata
 import json
 import logging
 import os
@@ -56,18 +57,19 @@ SERVER_INSTRUCTIONS = dedent(
     Core capabilities:
     - Fetch pages with silkworm over HTTP (`silkworm_fetch`) or a rendered browser session (`silkworm_fetch_cdp`).
     - Cache HTML documents in memory and reuse them via `document_handle`.
-    - Inspect DOM structure, query CSS/XPath selectors, compare competing selectors, prettify HTML,
-      and extract links before committing to a crawl.
+    - Inspect DOM structure, parse HTML into node trees, query CSS/XPath selectors, compare competing selectors,
+      prettify HTML, and extract links before committing to a crawl.
     - Run ad hoc crawls from a `CrawlBlueprint`, generate starter spider code, and validate that code.
 
     Recommended workflow:
     1. Start with `silkworm_fetch` for normal pages or `silkworm_fetch_cdp` for JavaScript-heavy pages.
     2. Reuse the returned `document_handle` instead of resending large HTML blobs.
     3. Call `inspect_document` to understand page structure and text density.
-    4. Refine selectors with `query_selector`, `compare_selectors`, `extract_links`, and `prettify_document`.
-    5. If rendered DOM behavior matters, validate against live browser output with `query_selector_cdp`
+    4. Use `parse_html_document` or `parse_html_fragment` when parser-level structure matters.
+    5. Refine selectors with `query_selector`, `compare_selectors`, `extract_links`, and `prettify_document`.
+    6. If rendered DOM behavior matters, validate against live browser output with `query_selector_cdp`
        or `extract_structured_data_cdp`.
-    6. Once the extraction plan is stable, use `run_crawl_blueprint` for a live crawl and
+    7. Once the extraction plan is stable, use `run_crawl_blueprint` for a live crawl and
        `generate_spider_template` plus `validate_spider_code` for production starter code.
 
     Operating guidance:
@@ -217,7 +219,9 @@ def _validate_url(url: str, *, field_name: str, schemes: set[str]) -> None:
     parsed = urlparse(url)
     if parsed.scheme.lower() not in schemes or not parsed.netloc:
         allowed = ", ".join(sorted(schemes))
-        raise ValueError(f"{field_name} must be an absolute URL using one of: {allowed}")
+        raise ValueError(
+            f"{field_name} must be an absolute URL using one of: {allowed}"
+        )
 
 
 def _load_server_settings() -> ServerSettings:
@@ -421,6 +425,31 @@ class PrettifyResult(BaseModel):
     output_chars: int
     truncated_output: bool
     prettified_html: str
+
+
+class HtmlParseNode(BaseModel):
+    node_type: str | None = None
+    tag: str | None = None
+    namespace: str | None = None
+    attrs: dict[str, str] = Field(default_factory=dict)
+    children: list["HtmlParseNode"] = Field(default_factory=list)
+    text: str | None = None
+    quirks_mode: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    name: str | None = None
+    public_id: str | None = None
+    system_id: str | None = None
+    target: str | None = None
+    data: str | None = None
+
+
+class HtmlParseResult(BaseModel):
+    document_handle: str | None = None
+    source_url: str | None = None
+    parse_mode: Literal["document", "fragment"]
+    max_size_bytes: int | None = None
+    truncate_on_limit: bool
+    root: HtmlParseNode
 
 
 class DeleteDocumentResult(BaseModel):
@@ -759,6 +788,9 @@ class SpiderCodeValidationResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+HtmlParseNode.model_rebuild()
+
+
 @dataclass(slots=True)
 class StoredDocument:
     handle: str
@@ -1027,6 +1059,34 @@ def _document_base_url(
     if document is not None:
         return document.source_url
     return None
+
+
+def _parse_html_tree(
+    html: str,
+    *,
+    parse_mode: Literal["document", "fragment"],
+    max_size_bytes: int | None,
+    truncate_on_limit: bool,
+) -> HtmlParseNode:
+    function_name = "parse_document" if parse_mode == "document" else "parse_fragment"
+    parse_func = getattr(scraper_rs, function_name, None)
+    if parse_func is None and hasattr(scraper_rs, "scraper_rs"):
+        parse_func = getattr(scraper_rs.scraper_rs, function_name, None)
+    if parse_func is None:
+        try:
+            version = importlib.metadata.version("scraper-rust")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+        raise RuntimeError(
+            f"scraper-rust {version} does not expose '{function_name}'. "
+            "Install a scraper-rust build that includes the new HTML tree parsing APIs."
+        )
+    parsed = parse_func(
+        html,
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+    return HtmlParseNode.model_validate(parsed)
 
 
 def _normalize_emulation(name: str) -> Emulation:
@@ -1503,7 +1563,7 @@ def _build_runtime_response_middlewares(
             retry_http_codes=blueprint.retry_http_codes or None,
             backoff_base=blueprint.retry_backoff_base,
             sleep_http_codes=blueprint.sleep_http_codes or None,
-        )
+        ),
     ]
 
 
@@ -1964,7 +2024,9 @@ def _render_spider_template(
     variant: SpiderTemplateVariant,
 ) -> str:
     safe_class_name = _normalize_identifier(class_name)
-    blueprint_json = indent(json.dumps(blueprint.model_dump(mode="json"), indent=2), " " * 4)
+    blueprint_json = indent(
+        json.dumps(blueprint.model_dump(mode="json"), indent=2), " " * 4
+    )
     runner_name = "run_spider_uvloop" if blueprint.use_uvloop_runner else "run_spider"
     shared_methods = indent(_render_template_shared_methods(), " " * 4)
     variant_methods = indent(_render_template_variant_methods(variant), " " * 4)
@@ -1975,7 +2037,7 @@ def _render_spider_template(
         "",
         "    def __init__(self, **kwargs):",
         '        super().__init__(name=BLUEPRINT["spider_name"], start_urls=BLUEPRINT["start_urls"], **kwargs)',
-        "        self.request_headers = dict(BLUEPRINT.get(\"request_headers\") or {})",
+        '        self.request_headers = dict(BLUEPRINT.get("request_headers") or {})',
         "        self._scheduled_requests = 0",
         "        self._emitted_items = 0",
     ]
@@ -2002,7 +2064,7 @@ def _render_spider_template(
         "",
         "\n".join(class_sections),
         "",
-        f"async def _run_cdp_spider():",
+        "async def _run_cdp_spider():",
         f"    spider = {safe_class_name}()",
         "    request_mw = [",
         "        UserAgentMiddleware(",
@@ -2244,6 +2306,62 @@ def prettify_document(
         output_chars=len(output),
         truncated_output=truncated,
         prettified_html=output,
+    )
+
+
+@mcp.tool(tags={"inspect", "selectors"})
+def parse_html_document(
+    document_handle: str | None = None,
+    html: str | None = None,
+    source_url: str | None = None,
+    max_size_bytes: int | None = DEFAULT_HTML_MAX_SIZE_BYTES,
+    truncate_on_limit: bool = False,
+) -> HtmlParseResult:
+    """Parse a full HTML document into a structured node tree using scraper_rs.parse_document."""
+    resolved_html, stored_document = _resolve_document_input(
+        document_handle=document_handle,
+        html=html,
+    )
+    return HtmlParseResult(
+        document_handle=stored_document.handle if stored_document else None,
+        source_url=_document_base_url(stored_document, source_url),
+        parse_mode="document",
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+        root=_parse_html_tree(
+            resolved_html,
+            parse_mode="document",
+            max_size_bytes=max_size_bytes,
+            truncate_on_limit=truncate_on_limit,
+        ),
+    )
+
+
+@mcp.tool(tags={"inspect", "selectors"})
+def parse_html_fragment(
+    document_handle: str | None = None,
+    html: str | None = None,
+    source_url: str | None = None,
+    max_size_bytes: int | None = DEFAULT_HTML_MAX_SIZE_BYTES,
+    truncate_on_limit: bool = False,
+) -> HtmlParseResult:
+    """Parse an HTML fragment into a structured node tree using scraper_rs.parse_fragment."""
+    resolved_html, stored_document = _resolve_document_input(
+        document_handle=document_handle,
+        html=html,
+    )
+    return HtmlParseResult(
+        document_handle=stored_document.handle if stored_document else None,
+        source_url=_document_base_url(stored_document, source_url),
+        parse_mode="fragment",
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+        root=_parse_html_tree(
+            resolved_html,
+            parse_mode="fragment",
+            max_size_bytes=max_size_bytes,
+            truncate_on_limit=truncate_on_limit,
+        ),
     )
 
 
@@ -2765,7 +2883,9 @@ async def run_crawl_blueprint(
                     dont_filter=dont_filter,
                 )
 
-        async def _build_pagination_requests(self, response: HTMLResponse) -> list[Request]:
+        async def _build_pagination_requests(
+            self, response: HTMLResponse
+        ) -> list[Request]:
             requests: list[Request] = []
             pagination_query = _query_pair_to_mode_and_query(
                 css=blueprint.pagination_selector,
@@ -3054,19 +3174,20 @@ def reference_overview() -> str:
 
         Purpose:
         - Expose silkworm fetching/crawling primitives to MCP clients.
-        - Expose scraper-rs parsing and selector debugging tools.
+        - Expose scraper-rs DOM parsing and selector debugging tools.
         - Help LLMs move from "I need a scraper" to "here is a working spider blueprint or template".
 
         Suggested workflow:
         1. `server_status` for runtime diagnostics when needed
         2. `silkworm_fetch` or `silkworm_fetch_cdp`
         3. `inspect_document`
-        4. `query_selector` and `compare_selectors`
-        5. `query_selector_cdp` or `extract_structured_data_cdp` for rendered-page debugging
-        6. `extract_links` for pagination/detail URL discovery
-        7. `run_crawl_blueprint`
-        8. `generate_spider_template`
-        9. `validate_spider_code`
+        4. `parse_html_document` or `parse_html_fragment`
+        5. `query_selector` and `compare_selectors`
+        6. `query_selector_cdp` or `extract_structured_data_cdp` for rendered-page debugging
+        7. `extract_links` for pagination/detail URL discovery
+        8. `run_crawl_blueprint`
+        9. `generate_spider_template`
+        10. `validate_spider_code`
 
         Silkworm knowledge resources:
         - `silkworm://reference/silkworm-cheatsheet`
@@ -3228,6 +3349,8 @@ def scraper_rs_cheatsheet() -> str:
 
         Main API:
         - `Document(html)`
+        - `scraper_rs.parse_document(html)`
+        - `scraper_rs.parse_fragment(html)`
         - `document.select(css)`
         - `document.select_first(css)`
         - `document.xpath(expr)`
@@ -3241,6 +3364,7 @@ def scraper_rs_cheatsheet() -> str:
         Notes:
         - CSS selectors are usually best for HTML-centric extraction.
         - XPath is useful when matching structure or text-heavy relationships.
+        - `parse_html_document` and `parse_html_fragment` expose parser-level node trees, parser errors, and quirks metadata through MCP.
         - Store HTML once, then compare selector candidates with `compare_selectors`.
         """
     ).strip()
@@ -3301,11 +3425,12 @@ def plan_silkworm_scraper(goal: str, target_url: str | None = None) -> str:
 
         Use the silkworm MCP workflow:
         1. Fetch or inspect the target page.
-        2. Identify stable item containers and field selectors.
-        3. Validate competing selectors with compare_selectors.
-        4. Detect pagination and detail links.
-        5. Use `transport="cdp"` for JavaScript-rendered pages that need a CDP browser.
-        6. Produce a CrawlBlueprint and, if helpful, a spider template.
+        2. Use `parse_html_document` or `parse_html_fragment` when parser-level structure matters.
+        3. Identify stable item containers and field selectors.
+        4. Validate competing selectors with compare_selectors.
+        5. Detect pagination and detail links.
+        6. Use `transport="cdp"` for JavaScript-rendered pages that need a CDP browser.
+        7. Produce a CrawlBlueprint and, if helpful, a spider template.
 
         Apply silkworm-specific rules:
         - Prefer HTTP before CDP; switch only when the rendered DOM materially changes extraction.
@@ -3337,6 +3462,7 @@ def debug_selector_strategy(
 
         Use these MCP tools in order:
         - inspect_document
+        - parse_html_document or parse_html_fragment when DOM structure is ambiguous
         - query_selector
         - compare_selectors
         - query_selector_cdp for JS-rendered pages
