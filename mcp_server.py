@@ -3071,6 +3071,7 @@ def reference_overview() -> str:
         Silkworm knowledge resources:
         - `silkworm://reference/silkworm-cheatsheet`
         - `silkworm://reference/silkworm-playbook`
+        - `silkworm://reference/template-variants`
         - `silkworm://reference/scraper-rs-cheatsheet`
         - `silkworm://reference/crawl-blueprint-schema`
 
@@ -3175,6 +3176,46 @@ def silkworm_playbook() -> str:
         - Callback pipeline demo: enrich or validate items without custom pipeline classes
         - Sitemap demo: opt into non-HTML responses for XML sitemap requests with `meta={"allow_non_html": True}`
         - Lightpanda/CDP demos: connect a `CDPClient`, swap engine transport, and close the client explicitly
+        """
+    ).strip()
+
+
+@mcp.resource("silkworm://reference/template-variants")
+def template_variants_reference() -> str:
+    return dedent(
+        """
+        # template and crawl variants
+
+        Use `variant="auto"` by default when:
+        - the blueprint already clearly signals the crawl shape
+        - you want `run_crawl_blueprint` and `generate_spider_template` to pick the normal Silkworm pattern
+        - start URLs, `transport`, and follow-link settings are trustworthy enough for inference
+
+        Choose `variant="list_only"` explicitly when:
+        - listing pages already contain the fields you need
+        - you want pagination but no detail-page crawling
+        - `follow_links_selector` might exist on the page but should not drive runtime behavior
+
+        Choose `variant="list_detail"` explicitly when:
+        - listing pages mainly act as navigation to detail pages
+        - final items should come from detail responses, not listing scopes
+        - you want `_listing_url` preserved on emitted detail items
+
+        Choose `variant="sitemap_xml"` explicitly when:
+        - entrypoints are XML sitemaps or sitemap indexes
+        - URLs do not obviously contain `sitemap` or end in `.xml`, so auto-inference may miss the intent
+        - you want requests to start with `meta={"allow_non_html": True}`
+
+        Choose `variant="cdp_heavy"` explicitly when:
+        - pages need rendered DOM state and you want the general parse/follow runtime shape
+        - `transport="cdp"` is required regardless of what the start URL looks like
+        - you do not want auto-inference to collapse the crawl into a simpler list-only or list-detail assumption
+
+        Inference summary:
+        - `auto` picks `sitemap_xml` for sitemap-like start URLs
+        - otherwise `auto` picks `cdp_heavy` for `transport="cdp"`
+        - otherwise `auto` picks `list_detail` when follow-link selectors are configured
+        - otherwise `auto` picks `list_only`
         """
     ).strip()
 

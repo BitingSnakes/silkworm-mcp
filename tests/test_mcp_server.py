@@ -28,6 +28,7 @@ from mcp_server import (
     silkworm_fetch,
     silkworm_playbook,
     store_html_document,
+    template_variants_reference,
 )
 
 SAMPLE_HTML = """
@@ -345,6 +346,17 @@ def test_silkworm_playbook_surfaces_framework_patterns() -> None:
     assert "response.follow(...)" in playbook
     assert "SkipNonHTMLMiddleware" in playbook
     assert 'meta={"allow_non_html": True}' in playbook
+
+
+def test_template_variants_reference_explains_auto_and_overrides() -> None:
+    reference = template_variants_reference()
+
+    assert 'variant="auto"' in reference
+    assert 'variant="list_only"' in reference
+    assert 'variant="list_detail"' in reference
+    assert 'variant="sitemap_xml"' in reference
+    assert 'variant="cdp_heavy"' in reference
+    assert 'transport="cdp"' in reference
 
 
 def test_generate_spider_template_infers_list_detail_variant() -> None:

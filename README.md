@@ -95,6 +95,7 @@ Useful built-in MCP references:
 - `silkworm://reference/overview`
 - `silkworm://reference/silkworm-cheatsheet`
 - `silkworm://reference/silkworm-playbook`
+- `silkworm://reference/template-variants`
 - `silkworm://reference/scraper-rs-cheatsheet`
 - `silkworm://reference/crawl-blueprint-schema`
 
