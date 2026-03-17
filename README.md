@@ -16,7 +16,7 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - Bound the in-memory cache with max-document, max-bytes, and idle-TTL controls.
 - Inspect pages with summaries, prettified HTML, CSS/XPath queries, selector comparisons, and link extraction.
 - Run ad hoc crawls from a structured `CrawlBlueprint`.
-- Generate reusable silkworm spider templates from the same blueprint and statically validate them.
+- Generate reusable silkworm spider templates from the same blueprint and statically validate them, including pattern-specific variants for list-only, list+detail, sitemap/XML, and CDP-heavy crawls.
 - Expose MCP diagnostics plus HTTP `/healthz` and `/readyz` routes for production monitoring.
 - Publish MCP resources and prompts so clients can discover workflows, Silkworm idioms, and blueprint schemas.
 
@@ -131,6 +131,15 @@ Useful built-in MCP references:
 ```
 
 Use `transport: "cdp"` when pages require JavaScript rendering. `run_crawl_blueprint` will connect to the configured CDP endpoint, and `generate_spider_template` will emit a starter spider that runs through `CDPClient` instead of the default HTTP client.
+
+Both `run_crawl_blueprint` and `generate_spider_template` accept a `variant` override. When omitted, they infer a crawl style from the blueprint:
+
+- `list_only`: listing pages emit items directly, with optional pagination
+- `list_detail`: listing pages schedule detail requests and a separate `parse_detail`
+- `sitemap_xml`: sitemap/XML entrypoints are fetched with `meta={"allow_non_html": True}` and parsed before scheduling page requests
+- `cdp_heavy`: rendered-page crawls keep the CDP execution path and a general-purpose parse/follow flow
+
+`run_crawl_blueprint` returns the resolved `execution_variant`, and `generate_spider_template` returns the resolved `template_variant`, so clients can see which crawl shape was actually used.
 
 ## Local Demo
 

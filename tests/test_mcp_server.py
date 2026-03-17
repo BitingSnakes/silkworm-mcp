@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import sys
 import time
 from pathlib import Path
 
 import pytest
+from silkworm import HTMLResponse
+from silkworm.request import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -15,6 +18,7 @@ from mcp_server import (
     CrawlFieldSpec,
     DocumentStore,
     SelectorMode,
+    SpiderTemplateVariant,
     clear_documents,
     generate_spider_template,
     list_documents,
@@ -55,6 +59,10 @@ def clear_global_documents() -> None:
     clear_documents()
     yield
     clear_documents()
+
+
+async def _collect_requests(generator) -> list[Request]:
+    return [item async for item in generator]
 
 
 def test_store_and_list_documents_include_runtime_metadata() -> None:
@@ -158,11 +166,14 @@ def test_generate_spider_template_closes_cdp_client() -> None:
 
     template = generate_spider_template(blueprint=blueprint, class_name="CatalogSpider")
 
+    assert template.template_variant == SpiderTemplateVariant.cdp_heavy
+    ast.parse(template.code)
     assert "await cdp_client.close()" in template.code
     assert "try:" in template.code
     assert "SkipNonHTMLMiddleware" in template.code
     assert "async def parse(self, response: Response):" in template.code
     assert "if not isinstance(response, HTMLResponse):" in template.code
+    assert "async def _build_follow_requests" in template.code
 
 
 def test_run_crawl_blueprint_closes_cdp_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,9 +228,176 @@ def test_run_crawl_blueprint_closes_cdp_client(monkeypatch: pytest.MonkeyPatch) 
     assert fake_client.closed is True
 
 
+def test_run_crawl_blueprint_reports_inferred_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDefaultHTTP:
+        async def close(self) -> None:
+            return None
+
+    class FakeEngine:
+        def __init__(self, spider, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self.spider = spider
+            self.http = FakeDefaultHTTP()
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(mcp_server, "Engine", FakeEngine)
+
+    blueprint = CrawlBlueprint(
+        spider_name="catalog_spider",
+        start_urls=["https://example.com/catalog"],
+        follow_links_selector="a.detail",
+        fields=[CrawlFieldSpec(name="name", css="h1")],
+    )
+
+    result = asyncio.run(run_crawl_blueprint(blueprint))
+
+    assert result.execution_variant == SpiderTemplateVariant.list_detail
+
+
+def test_run_crawl_blueprint_sitemap_variant_uses_xml_start_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDefaultHTTP:
+        async def close(self) -> None:
+            return None
+
+    class FakeEngine:
+        instances: list[FakeEngine] = []
+
+        def __init__(self, spider, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self.spider = spider
+            self.http = FakeDefaultHTTP()
+            FakeEngine.instances.append(self)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(mcp_server, "Engine", FakeEngine)
+
+    blueprint = CrawlBlueprint(
+        spider_name="sitemap_spider",
+        start_urls=["https://example.com/sitemap.xml"],
+        fields=[CrawlFieldSpec(name="title", css="title")],
+    )
+
+    result = asyncio.run(run_crawl_blueprint(blueprint))
+    spider = FakeEngine.instances[-1].spider
+    first_request = asyncio.run(anext(spider.start_requests()))
+
+    assert result.execution_variant == SpiderTemplateVariant.sitemap_xml
+    assert first_request.callback == spider.parse_sitemap
+    assert first_request.meta["allow_non_html"] is True
+    assert first_request.dont_filter is True
+
+
+def test_run_crawl_blueprint_list_detail_variant_schedules_detail_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDefaultHTTP:
+        async def close(self) -> None:
+            return None
+
+    class FakeEngine:
+        instances: list[FakeEngine] = []
+
+        def __init__(self, spider, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self.spider = spider
+            self.http = FakeDefaultHTTP()
+            FakeEngine.instances.append(self)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(mcp_server, "Engine", FakeEngine)
+
+    blueprint = CrawlBlueprint(
+        spider_name="catalog_spider",
+        start_urls=["https://example.com/catalog"],
+        follow_links_selector="a.detail",
+        pagination_selector="a.next",
+        fields=[CrawlFieldSpec(name="name", css="h1")],
+    )
+
+    asyncio.run(run_crawl_blueprint(blueprint, variant=SpiderTemplateVariant.list_detail))
+    spider = FakeEngine.instances[-1].spider
+    response = HTMLResponse(
+        url="https://example.com/catalog",
+        status=200,
+        headers={"content-type": "text/html"},
+        body=SAMPLE_HTML.encode(),
+        request=Request(url="https://example.com/catalog", callback=spider.parse),
+    )
+
+    scheduled = asyncio.run(_collect_requests(spider.parse(response)))
+
+    assert [request.callback for request in scheduled[:2]] == [
+        spider.parse_detail,
+        spider.parse_detail,
+    ]
+    assert scheduled[0].meta["listing_url"] == "https://example.com/catalog"
+    assert scheduled[-1].callback == spider.parse
+
+
 def test_silkworm_playbook_surfaces_framework_patterns() -> None:
     playbook = silkworm_playbook()
 
     assert "response.follow(...)" in playbook
     assert "SkipNonHTMLMiddleware" in playbook
     assert 'meta={"allow_non_html": True}' in playbook
+
+
+def test_generate_spider_template_infers_list_detail_variant() -> None:
+    blueprint = CrawlBlueprint(
+        spider_name="catalog_spider",
+        start_urls=["https://example.com/catalog"],
+        follow_links_selector="a.detail",
+        pagination_selector="a.next",
+        fields=[CrawlFieldSpec(name="name", css="h1")],
+    )
+
+    template = generate_spider_template(blueprint=blueprint, class_name="CatalogSpider")
+
+    assert template.template_variant == SpiderTemplateVariant.list_detail
+    ast.parse(template.code)
+    assert "async def parse_detail(self, response: Response):" in template.code
+    assert 'meta={"listing_url": response.url}' in template.code
+    assert "callback=self.parse_detail" in template.code
+
+
+def test_generate_spider_template_supports_explicit_sitemap_variant() -> None:
+    blueprint = CrawlBlueprint(
+        spider_name="sitemap_spider",
+        start_urls=["https://example.com/start"],
+        fields=[CrawlFieldSpec(name="title", css="title")],
+    )
+
+    template = generate_spider_template(
+        blueprint=blueprint,
+        class_name="SitemapSpider",
+        variant=SpiderTemplateVariant.sitemap_xml,
+    )
+
+    assert template.template_variant == SpiderTemplateVariant.sitemap_xml
+    ast.parse(template.code)
+    assert "import xml.etree.ElementTree as ET" in template.code
+    assert "callback=self.parse_sitemap" in template.code
+    assert 'meta={"allow_non_html": True}' in template.code
+    assert "async def parse_page(self, response: Response):" in template.code
+
+
+def test_generate_spider_template_infers_list_only_variant() -> None:
+    blueprint = CrawlBlueprint(
+        spider_name="catalog_spider",
+        start_urls=["https://example.com/catalog"],
+        item_selector=".product",
+        pagination_selector="a.next",
+        fields=[CrawlFieldSpec(name="name", css=".name")],
+    )
+
+    template = generate_spider_template(blueprint=blueprint, class_name="CatalogSpider")
+
+    assert template.template_variant == SpiderTemplateVariant.list_only
+    ast.parse(template.code)
+    assert "async def _build_pagination_requests" in template.code
+    assert "async def parse_detail" not in template.code
