@@ -110,7 +110,7 @@ def main() -> None:
     assert "run_spider_uvloop" in template.code
     assert "UserAgentMiddleware" in template.code
     assert "RetryMiddleware" in template.code
-    assert 'output_jsonl_path' in template.code
+    assert "output_jsonl_path" in template.code
     assert 'BLUEPRINT.get("transport") == "cdp"' in template.code
     assert "CDPClient(" in template.code
     validation = validate_spider_code(

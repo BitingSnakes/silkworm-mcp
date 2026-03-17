@@ -21,7 +21,6 @@ from silkworm import Engine, HTMLResponse, Request, Spider
 from silkworm.cdp import CDPClient
 from silkworm.http import HttpClient
 from silkworm.middlewares import DelayMiddleware, RetryMiddleware, UserAgentMiddleware
-from silkworm.pipelines import JsonLinesPipeline
 
 SERVER_VERSION = "0.1.0"
 DEFAULT_HTML_MAX_SIZE_BYTES = 5_000_000
@@ -423,9 +422,8 @@ class CrawlBlueprint(BaseModel):
             self.follow_links_xpath,
             "follow_links_selector/follow_links_xpath",
         )
-        if (
-            self.delay_seconds is not None
-            and (self.delay_min_seconds is not None or self.delay_max_seconds is not None)
+        if self.delay_seconds is not None and (
+            self.delay_min_seconds is not None or self.delay_max_seconds is not None
         ):
             raise ValueError(
                 "Use either delay_seconds or delay_min_seconds/delay_max_seconds, not both."
@@ -666,10 +664,7 @@ def _query_document(
         return document.xpath(query)
     except ValueError as exc:
         sanitized_html = _strip_leading_doctype(document.html)
-        if (
-            not _is_unsupported_xpath_dtd_error(exc)
-            or sanitized_html == document.html
-        ):
+        if not _is_unsupported_xpath_dtd_error(exc) or sanitized_html == document.html:
             raise
         fallback_document = scraper_rs.Document(sanitized_html)
         try:
@@ -690,10 +685,7 @@ def _query_document_first(
         return document.xpath_first(query)
     except ValueError as exc:
         sanitized_html = _strip_leading_doctype(document.html)
-        if (
-            not _is_unsupported_xpath_dtd_error(exc)
-            or sanitized_html == document.html
-        ):
+        if not _is_unsupported_xpath_dtd_error(exc) or sanitized_html == document.html:
             raise
         fallback_document = scraper_rs.Document(sanitized_html)
         try:
@@ -1822,7 +1814,8 @@ async def extract_structured_data_cdp(
             status=fetch_result.status,
             headers=fetch_result.headers,
             document_handle=fetch_result.document_handle,
-            summary=fetch_result.summary or _build_summary(
+            summary=fetch_result.summary
+            or _build_summary(
                 html,
                 source_url=fetch_result.final_url,
                 fetched_via="cdp",
@@ -1896,9 +1889,7 @@ def validate_spider_code(
     if not spider_classes:
         issues.append("No class inheriting from Spider was found.")
     if expected_class_name and expected_class_name not in spider_classes:
-        issues.append(
-            f"Expected spider class '{expected_class_name}' was not found."
-        )
+        issues.append(f"Expected spider class '{expected_class_name}' was not found.")
     if not (uses_run_spider or uses_run_spider_uvloop):
         issues.append("No run_spider/run_spider_uvloop entrypoint call was found.")
 
