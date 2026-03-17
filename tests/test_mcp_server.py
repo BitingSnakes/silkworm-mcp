@@ -22,6 +22,7 @@ from mcp_server import (
     run_crawl_blueprint,
     server_status,
     silkworm_fetch,
+    silkworm_playbook,
     store_html_document,
 )
 
@@ -159,6 +160,9 @@ def test_generate_spider_template_closes_cdp_client() -> None:
 
     assert "await cdp_client.close()" in template.code
     assert "try:" in template.code
+    assert "SkipNonHTMLMiddleware" in template.code
+    assert "async def parse(self, response: Response):" in template.code
+    assert "if not isinstance(response, HTMLResponse):" in template.code
 
 
 def test_run_crawl_blueprint_closes_cdp_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,3 +215,11 @@ def test_run_crawl_blueprint_closes_cdp_client(monkeypatch: pytest.MonkeyPatch) 
     assert engine.initial_http.closed is True
     assert fake_client.connected is True
     assert fake_client.closed is True
+
+
+def test_silkworm_playbook_surfaces_framework_patterns() -> None:
+    playbook = silkworm_playbook()
+
+    assert "response.follow(...)" in playbook
+    assert "SkipNonHTMLMiddleware" in playbook
+    assert 'meta={"allow_non_html": True}' in playbook

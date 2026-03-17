@@ -69,6 +69,15 @@ SERVER_INSTRUCTIONS = dedent(
     - Use CSS selectors by default unless XPath is clearly a better fit.
     - Verify pagination, detail-page links, and field extraction on a small sample before scaling up.
     - When generating code, keep the crawl blueprint aligned with the selectors already validated interactively.
+    - Treat silkworm as an async Spider/Request/Response framework: `parse()` yields items and follow-up `Request`s.
+    - Default to guarding `parse()` with `isinstance(response, HTMLResponse)` unless the crawl intentionally accepts XML/JSON/binary responses.
+    - Prefer `response.follow(...)` for pagination/detail links so callbacks, relative URLs, and headers stay consistent.
+    - Use `UserAgentMiddleware`, `RetryMiddleware`, `DelayMiddleware`, and `SkipNonHTMLMiddleware` deliberately based on the target site's behavior.
+    - Prefer page-level list extraction first; only follow detail links when key fields are absent from listing pages.
+    - For JavaScript-heavy pages, switch to CDP only after plain HTTP validation suggests rendered DOM differences or missing content.
+    - Keep generated spiders production-oriented: bounded `max_requests`, bounded `max_items`, explicit timeouts, and optional JSON Lines output.
+    - When extracting repeated fields, use `all_matches=true`; for links set `extractor="attr"` plus `attr_name="href"` and usually `absolute_url=true`.
+    - Include `_source_url` on items unless there is a strong reason not to, because it simplifies crawl debugging and downstream validation.
     """
 ).strip()
 
@@ -1600,9 +1609,14 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
         import json
         from urllib.parse import urljoin
 
-        from silkworm import Engine, HTMLResponse, Request, Spider, {runner_name}
+        from silkworm import Engine, HTMLResponse, Request, Response, Spider, {runner_name}
         from silkworm.cdp import CDPClient
-        from silkworm.middlewares import DelayMiddleware, RetryMiddleware, UserAgentMiddleware
+        from silkworm.middlewares import (
+            DelayMiddleware,
+            RetryMiddleware,
+            SkipNonHTMLMiddleware,
+            UserAgentMiddleware,
+        )
         from silkworm.pipelines import JsonLinesPipeline
 
 
@@ -1707,7 +1721,10 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
 
                 return requests
 
-            async def parse(self, response: HTMLResponse):
+            async def parse(self, response: Response):
+                if not isinstance(response, HTMLResponse):
+                    return
+
                 if self._emitted_items >= BLUEPRINT["max_items"]:
                     return
 
@@ -1758,6 +1775,7 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
                     )
                 )
             response_mw = [
+                SkipNonHTMLMiddleware(),
                 RetryMiddleware(
                     max_times=BLUEPRINT.get("retry_max_times", 3),
                     retry_http_codes=BLUEPRINT.get("retry_http_codes") or None,
@@ -1833,6 +1851,7 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
                     )
                 )
             response_mw = [
+                SkipNonHTMLMiddleware(),
                 RetryMiddleware(
                     max_times=BLUEPRINT.get("retry_max_times", 3),
                     retry_http_codes=BLUEPRINT.get("retry_http_codes") or None,
@@ -2676,6 +2695,12 @@ def reference_overview() -> str:
         8. `generate_spider_template`
         9. `validate_spider_code`
 
+        Silkworm knowledge resources:
+        - `silkworm://reference/silkworm-cheatsheet`
+        - `silkworm://reference/silkworm-playbook`
+        - `silkworm://reference/scraper-rs-cheatsheet`
+        - `silkworm://reference/crawl-blueprint-schema`
+
         Document handles:
         - Most tools accept either `document_handle` or raw `html`.
         - Prefer handles so clients do not resend large HTML payloads.
@@ -2697,11 +2722,35 @@ def silkworm_cheatsheet() -> str:
         - `Engine`: drives the crawl with concurrency, timeouts, and pipelines
 
         Common patterns:
+        - `parse()` should usually accept `Response`, then guard with `isinstance(response, HTMLResponse)` before HTML extraction
         - Start pages: yield `Request(url=..., callback=self.parse)`
         - Extract containers: `await response.select("article.card")`
-        - Follow pagination: `yield response.follow(next_href, callback=self.parse)`
+        - Follow pagination/detail pages: `yield response.follow(next_href, callback=self.parse)`
         - Extract items: yield dicts from `parse()`
+        - Preserve provenance: include `_source_url` or a page URL field on emitted items
         - JS-rendered pages: set `transport="cdp"` and `cdp_ws_endpoint` in `CrawlBlueprint`
+
+        Middleware heuristics:
+        - `UserAgentMiddleware`: use by default
+        - `RetryMiddleware`: use for transient failures or anti-bot throttling
+        - `DelayMiddleware`: add when a site is rate-sensitive or you need politeness
+        - `SkipNonHTMLMiddleware`: use for normal HTML crawls so image/API responses do not hit HTML callbacks
+        - `request.meta["allow_non_html"] = True`: opt out per request when intentionally fetching XML or other non-HTML content
+
+        Extraction heuristics:
+        - Prefer CSS selectors first; switch to XPath only when structure/text relationships are awkward in CSS
+        - Use `all_matches=true` for repeated tags/categories/images
+        - Use `extractor="attr"` with `attr_name="href"` or `src` for URLs/assets
+        - Set `absolute_url=true` whenever a field should be reusable outside the current page context
+        - Use `join_with` only when downstream consumers want a flat string instead of an array
+
+        Crawl design rules:
+        - If listing pages already contain the needed fields, do not follow detail pages
+        - If a field only exists on details, extract the detail URL first, then follow it
+        - Validate selectors on one page before enabling pagination
+        - Keep `max_requests`, `max_items`, `concurrency`, and `request_timeout` explicit while prototyping
+        - Prefer JSON Lines output for generated starter spiders
+        - Use `run_spider_uvloop` when available, otherwise `run_spider`
 
         Useful engine knobs:
         - `concurrency`
@@ -2709,6 +2758,50 @@ def silkworm_cheatsheet() -> str:
         - `max_pending_requests`
         - `html_max_size_bytes`
         - `keep_alive`
+        """
+    ).strip()
+
+
+@mcp.resource("silkworm://reference/silkworm-playbook")
+def silkworm_playbook() -> str:
+    return dedent(
+        """
+        # silkworm scraper playbook
+
+        Goal:
+        - Generate scrapers that follow silkworm idioms closely enough to run with minimal manual fixes.
+
+        Decision tree:
+        1. Start with `silkworm_fetch` on a representative page.
+        2. If the important content is present in the returned HTML, stay on normal HTTP transport.
+        3. If content is missing, delayed, or selector results differ after render, switch to `silkworm_fetch_cdp` and set `transport="cdp"` in the blueprint.
+        4. Find the smallest stable item container before defining field selectors.
+        5. Extract list-page fields first; only add detail-page crawling when essential fields are absent.
+        6. Validate pagination separately from item extraction.
+
+        Blueprint design guidance:
+        - `item_selector` should point at one logical record card/row/article.
+        - `fields` should be relative to the item scope whenever possible.
+        - For URLs use `extractor="attr"`, `attr_name="href"`, and usually `absolute_url=true`.
+        - For repeated values such as tags, features, or breadcrumbs use `all_matches=true`.
+        - Use `pagination_selector` for one "next page" control, not all page links.
+        - Use `follow_links_selector` only for detail URLs, and keep `follow_link_limit_per_page` bounded.
+        - Keep `include_source_url=true` during development.
+
+        Generated spider expectations:
+        - Import `Response` and `HTMLResponse`.
+        - Guard non-HTML responses before selector calls.
+        - Use `response.follow(...)` instead of hand-rolled `urljoin(...)` for crawl navigation.
+        - Add `UserAgentMiddleware` by default.
+        - Add `RetryMiddleware` and usually `SkipNonHTMLMiddleware` for HTML crawls.
+        - Add `DelayMiddleware` only when the target site needs slower pacing.
+        - Output to `JsonLinesPipeline` unless another sink is explicitly required.
+
+        Patterns from the bundled Silkworm examples:
+        - Quotes demo: list-page extraction + pagination with `response.follow`
+        - Callback pipeline demo: enrich or validate items without custom pipeline classes
+        - Sitemap demo: opt into non-HTML responses for XML sitemap requests with `meta={"allow_non_html": True}`
+        - Lightpanda/CDP demos: connect a `CDPClient`, swap engine transport, and close the client explicitly
         """
     ).strip()
 
@@ -2800,6 +2893,15 @@ def plan_silkworm_scraper(goal: str, target_url: str | None = None) -> str:
         5. Use `transport="cdp"` for JavaScript-rendered pages that need a CDP browser.
         6. Produce a CrawlBlueprint and, if helpful, a spider template.
 
+        Apply silkworm-specific rules:
+        - Prefer HTTP before CDP; switch only when the rendered DOM materially changes extraction.
+        - Keep selectors relative to the item scope.
+        - Use `extractor="attr"` with `attr_name="href"` and `absolute_url=true` for navigational links.
+        - Use `all_matches=true` for repeated fields like tags or categories.
+        - Avoid detail-page crawling if listing pages already contain the required fields.
+        - Plan for `UserAgentMiddleware`, `RetryMiddleware`, and usually `SkipNonHTMLMiddleware`.
+        - Keep `max_requests`, `max_items`, `concurrency`, and `request_timeout_seconds` explicit.
+
         Prefer document handles over repeatedly embedding raw HTML.
         """
     ).strip()
@@ -2827,6 +2929,8 @@ def debug_selector_strategy(
         - extract_links if navigation is involved
 
         Prefer selectors that are specific enough to avoid false positives but resilient to layout changes.
+        Favor selectors relative to each item container instead of brittle page-wide selectors.
+        If the selected nodes are links or assets, verify whether `attr("href")` or `attr("src")` is the real target value.
         """
     ).strip()
 

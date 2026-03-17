@@ -18,7 +18,7 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - Run ad hoc crawls from a structured `CrawlBlueprint`.
 - Generate reusable silkworm spider templates from the same blueprint and statically validate them.
 - Expose MCP diagnostics plus HTTP `/healthz` and `/readyz` routes for production monitoring.
-- Publish MCP resources and prompts so clients can discover workflows and schemas.
+- Publish MCP resources and prompts so clients can discover workflows, Silkworm idioms, and blueprint schemas.
 
 ## Tools
 
@@ -89,6 +89,14 @@ Key runtime environment variables:
 5. Use `extract_links` to verify pagination or detail pages.
 6. Feed the stable plan into `run_crawl_blueprint`.
 7. Convert the same blueprint into code with `generate_spider_template`, then check it with `validate_spider_code`.
+
+Useful built-in MCP references:
+
+- `silkworm://reference/overview`
+- `silkworm://reference/silkworm-cheatsheet`
+- `silkworm://reference/silkworm-playbook`
+- `silkworm://reference/scraper-rs-cheatsheet`
+- `silkworm://reference/crawl-blueprint-schema`
 
 ## Blueprint Example
 
