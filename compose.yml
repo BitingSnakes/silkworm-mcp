@@ -3,7 +3,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    init: true
+    environment:
+      SILKWORM_MCP_DOCUMENT_MAX_COUNT: "256"
+      SILKWORM_MCP_DOCUMENT_MAX_TOTAL_BYTES: "64000000"
+      SILKWORM_MCP_DOCUMENT_TTL_SECONDS: "7200"
+      SILKWORM_MCP_READINESS_REQUIRE_CDP: "true"
     ports:
       - "8000:8000"
-      - "9222:9222"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
+    stop_grace_period: 30s

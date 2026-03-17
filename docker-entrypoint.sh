@@ -1,6 +1,44 @@
 #!/bin/sh
 set -eu
 
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+: "${MCP_TRANSPORT:=http}"
+: "${MCP_HOST:=0.0.0.0}"
+: "${MCP_PORT:=8000}"
+: "${MCP_PATH:=}"
+: "${LIGHTPANDA_ENABLED:=1}"
+: "${LIGHTPANDA_HOST:=127.0.0.1}"
+: "${LIGHTPANDA_PORT:=9222}"
+: "${LIGHTPANDA_LOG_FORMAT:=pretty}"
+: "${LIGHTPANDA_LOG_LEVEL:=info}"
+
+if [ -z "${SILKWORM_MCP_READINESS_CDP_WS_ENDPOINT:-}" ]; then
+  export SILKWORM_MCP_READINESS_CDP_WS_ENDPOINT="ws://${LIGHTPANDA_HOST}:${LIGHTPANDA_PORT}"
+fi
+
+if [ -z "${SILKWORM_MCP_READINESS_REQUIRE_CDP:-}" ]; then
+  if is_truthy "$LIGHTPANDA_ENABLED"; then
+    export SILKWORM_MCP_READINESS_REQUIRE_CDP=true
+  else
+    export SILKWORM_MCP_READINESS_REQUIRE_CDP=false
+  fi
+fi
+
+set -- python mcp_server.py --transport "$MCP_TRANSPORT" --host "$MCP_HOST" --port "$MCP_PORT"
+if [ -n "$MCP_PATH" ]; then
+  set -- "$@" --path "$MCP_PATH"
+fi
+
 lightpanda_pid=''
 mcp_pid=''
 
@@ -13,12 +51,20 @@ cleanup() {
   fi
 }
 
-trap cleanup INT TERM
+trap cleanup EXIT INT TERM HUP
 
-lightpanda serve --log_format pretty --log_level info --host 127.0.0.1 --port 9222 &
+if ! is_truthy "$LIGHTPANDA_ENABLED"; then
+  exec "$@"
+fi
+
+lightpanda serve \
+  --log_format "$LIGHTPANDA_LOG_FORMAT" \
+  --log_level "$LIGHTPANDA_LOG_LEVEL" \
+  --host "$LIGHTPANDA_HOST" \
+  --port "$LIGHTPANDA_PORT" &
 lightpanda_pid=$!
 
-python mcp_server.py --transport http --host 0.0.0.0 --port 8000 &
+"$@" &
 mcp_pid=$!
 
 exit_code=0

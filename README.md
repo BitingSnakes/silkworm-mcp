@@ -13,9 +13,11 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - Query selectors directly against a CDP-rendered DOM snapshot.
 - Extract structured records from live rendered pages before committing to a full crawl.
 - Cache HTML in-memory and reuse it via `document_handle`.
+- Bound the in-memory cache with max-document, max-bytes, and idle-TTL controls.
 - Inspect pages with summaries, prettified HTML, CSS/XPath queries, selector comparisons, and link extraction.
 - Run ad hoc crawls from a structured `CrawlBlueprint`.
 - Generate reusable silkworm spider templates from the same blueprint and statically validate them.
+- Expose MCP diagnostics plus HTTP `/healthz` and `/readyz` routes for production monitoring.
 - Publish MCP resources and prompts so clients can discover workflows and schemas.
 
 ## Tools
@@ -24,6 +26,7 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - `list_documents`
 - `delete_document`
 - `clear_documents`
+- `server_status`
 - `inspect_document`
 - `prettify_document`
 - `query_selector`
@@ -57,11 +60,25 @@ Run over HTTP:
 uv run python mcp_server.py --transport http --host 127.0.0.1 --port 8000
 ```
 
+HTTP deployments also expose:
+
+- `GET /healthz`: process liveness
+- `GET /readyz`: readiness, optionally including a CDP browser probe
+
 The project also exposes a console entrypoint:
 
 ```bash
 uv run silkworm-mcp --transport stdio
 ```
+
+Key runtime environment variables:
+
+- `SILKWORM_MCP_DOCUMENT_MAX_COUNT`
+- `SILKWORM_MCP_DOCUMENT_MAX_TOTAL_BYTES`
+- `SILKWORM_MCP_DOCUMENT_TTL_SECONDS`
+- `SILKWORM_MCP_LOG_LEVEL`
+- `SILKWORM_MCP_READINESS_REQUIRE_CDP`
+- `SILKWORM_MCP_READINESS_CDP_WS_ENDPOINT`
 
 ## Example Workflow
 
@@ -120,3 +137,18 @@ Run it with:
 ```bash
 uv run python mcp_test.py
 ```
+
+## Testing
+
+Run the automated test suite with:
+
+```bash
+uv run --group dev pytest
+```
+
+## Production Notes
+
+- Use `server_status` or the `silkworm://status` resource to inspect cache usage, uptime, and runtime configuration.
+- The document cache is bounded by count, total bytes, and idle TTL so long-running HTTP deployments do not grow unbounded.
+- `compose.yml` publishes only the MCP HTTP port; the Lightpanda CDP port stays internal to the container.
+- The generated CDP spider template and `run_crawl_blueprint` now close CDP clients explicitly on shutdown.

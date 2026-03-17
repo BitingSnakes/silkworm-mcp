@@ -3,29 +3,43 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import logging
+import os
 import re
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from textwrap import dedent, indent
 from typing import Any, Literal
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import scraper_rs
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from rnet import Emulation
 from silkworm import Engine, HTMLResponse, Request, Spider
 from silkworm.cdp import CDPClient
 from silkworm.http import HttpClient
 from silkworm.middlewares import DelayMiddleware, RetryMiddleware, UserAgentMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import JSONResponse, Response
 
+SERVER_NAME = "silkworm-mcp"
 SERVER_VERSION = "0.1.0"
 DEFAULT_HTML_MAX_SIZE_BYTES = 5_000_000
 DEFAULT_TEXT_PREVIEW_CHARS = 1_200
 DEFAULT_HTML_PREVIEW_CHARS = 1_500
+DEFAULT_DOCUMENT_MAX_COUNT = 128
+DEFAULT_DOCUMENT_MAX_TOTAL_BYTES = 32_000_000
+DEFAULT_DOCUMENT_TTL_SECONDS = 3_600.0
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_HTTP_HEALTH_PATH = "/healthz"
+DEFAULT_HTTP_READY_PATH = "/readyz"
+DEFAULT_READINESS_PROBE_TIMEOUT_SECONDS = 5.0
+_VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 SERVER_INSTRUCTIONS = dedent(
     """
@@ -58,13 +72,6 @@ SERVER_INSTRUCTIONS = dedent(
     """
 ).strip()
 
-mcp = FastMCP(
-    "silkworm-mcp",
-    instructions=SERVER_INSTRUCTIONS,
-    version=SERVER_VERSION,
-    website_url="https://github.com/BitingSnakes/silkworm-mcp",
-)
-
 
 class SelectorMode(str, Enum):
     css = "css"
@@ -82,14 +89,241 @@ class CrawlTransport(str, Enum):
     cdp = "cdp"
 
 
+class ServerSettings(BaseModel):
+    document_max_count: int = Field(default=DEFAULT_DOCUMENT_MAX_COUNT, ge=1, le=5_000)
+    document_max_total_bytes: int = Field(
+        default=DEFAULT_DOCUMENT_MAX_TOTAL_BYTES,
+        ge=4_096,
+        le=1_000_000_000,
+    )
+    document_ttl_seconds: float | None = Field(
+        default=DEFAULT_DOCUMENT_TTL_SECONDS,
+        ge=0.1,
+        le=604_800,
+    )
+    log_level: str = DEFAULT_LOG_LEVEL
+    mask_error_details: bool = True
+    strict_input_validation: bool = True
+    default_transport: Literal["stdio", "http", "sse", "streamable-http"] = "stdio"
+    default_host: str = "127.0.0.1"
+    default_port: int = Field(default=8000, ge=1, le=65535)
+    default_path: str | None = None
+    http_health_path: str = DEFAULT_HTTP_HEALTH_PATH
+    http_ready_path: str = DEFAULT_HTTP_READY_PATH
+    readiness_require_cdp: bool = False
+    readiness_cdp_ws_endpoint: str = "ws://127.0.0.1:9222"
+    readiness_probe_timeout_seconds: float = Field(
+        default=DEFAULT_READINESS_PROBE_TIMEOUT_SECONDS,
+        ge=0.1,
+        le=60.0,
+    )
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in _VALID_LOG_LEVELS:
+            choices = ", ".join(sorted(_VALID_LOG_LEVELS))
+            raise ValueError(f"log_level must be one of: {choices}")
+        return normalized
+
+    @field_validator("http_health_path", "http_ready_path")
+    @classmethod
+    def validate_http_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("HTTP route paths must start with '/'.")
+        return value.rstrip("/") or "/"
+
+    @field_validator("readiness_cdp_ws_endpoint")
+    @classmethod
+    def validate_ws_endpoint(cls, value: str) -> str:
+        _validate_url(
+            value,
+            field_name="readiness_cdp_ws_endpoint",
+            schemes={"ws", "wss"},
+        )
+        return value
+
+    @model_validator(mode="after")
+    def validate_routes(self) -> "ServerSettings":
+        if self.http_health_path == self.http_ready_path:
+            raise ValueError(
+                "http_health_path and http_ready_path must be different routes."
+            )
+        return self
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Environment variable {name} must be a boolean value.")
+
+
+def _env_optional_str(name: str, default: str | None) -> str | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    value = raw_value.strip()
+    return value or None
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return int(raw_value)
+
+
+def _env_optional_float(name: str, default: float | None) -> float | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    value = raw_value.strip()
+    if not value:
+        return None
+    return float(value)
+
+
+def _validate_url(url: str, *, field_name: str, schemes: set[str]) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in schemes or not parsed.netloc:
+        allowed = ", ".join(sorted(schemes))
+        raise ValueError(f"{field_name} must be an absolute URL using one of: {allowed}")
+
+
+def _load_server_settings() -> ServerSettings:
+    payload = {
+        "document_max_count": _env_int(
+            "SILKWORM_MCP_DOCUMENT_MAX_COUNT",
+            DEFAULT_DOCUMENT_MAX_COUNT,
+        ),
+        "document_max_total_bytes": _env_int(
+            "SILKWORM_MCP_DOCUMENT_MAX_TOTAL_BYTES",
+            DEFAULT_DOCUMENT_MAX_TOTAL_BYTES,
+        ),
+        "document_ttl_seconds": _env_optional_float(
+            "SILKWORM_MCP_DOCUMENT_TTL_SECONDS",
+            DEFAULT_DOCUMENT_TTL_SECONDS,
+        ),
+        "log_level": os.getenv("SILKWORM_MCP_LOG_LEVEL", DEFAULT_LOG_LEVEL),
+        "mask_error_details": _env_bool("SILKWORM_MCP_MASK_ERROR_DETAILS", True),
+        "strict_input_validation": _env_bool(
+            "SILKWORM_MCP_STRICT_INPUT_VALIDATION",
+            True,
+        ),
+        "default_transport": os.getenv("SILKWORM_MCP_TRANSPORT", "stdio"),
+        "default_host": os.getenv("SILKWORM_MCP_HOST", "127.0.0.1"),
+        "default_port": _env_int("SILKWORM_MCP_PORT", 8000),
+        "default_path": _env_optional_str("SILKWORM_MCP_PATH", None),
+        "http_health_path": os.getenv(
+            "SILKWORM_MCP_HTTP_HEALTH_PATH",
+            DEFAULT_HTTP_HEALTH_PATH,
+        ),
+        "http_ready_path": os.getenv(
+            "SILKWORM_MCP_HTTP_READY_PATH",
+            DEFAULT_HTTP_READY_PATH,
+        ),
+        "readiness_require_cdp": _env_bool(
+            "SILKWORM_MCP_READINESS_REQUIRE_CDP",
+            False,
+        ),
+        "readiness_cdp_ws_endpoint": os.getenv(
+            "SILKWORM_MCP_READINESS_CDP_WS_ENDPOINT",
+            "ws://127.0.0.1:9222",
+        ),
+        "readiness_probe_timeout_seconds": float(
+            os.getenv(
+                "SILKWORM_MCP_READINESS_PROBE_TIMEOUT_SECONDS",
+                str(DEFAULT_READINESS_PROBE_TIMEOUT_SECONDS),
+            )
+        ),
+    }
+    return ServerSettings.model_validate(payload)
+
+
+SERVER_SETTINGS = _load_server_settings()
+logger = logging.getLogger(__name__)
+
+mcp = FastMCP(
+    SERVER_NAME,
+    instructions=SERVER_INSTRUCTIONS,
+    version=SERVER_VERSION,
+    website_url="https://github.com/BitingSnakes/silkworm-mcp",
+    mask_error_details=SERVER_SETTINGS.mask_error_details,
+    strict_input_validation=SERVER_SETTINGS.strict_input_validation,
+)
+
+
 class StoredDocumentInfo(BaseModel):
     handle: str
     label: str | None = None
     source_url: str | None = None
     stored_at: str
+    last_accessed_at: str
+    expires_at: str | None = None
     fetched_via: str | None = None
     status: int | None = None
     html_chars: int
+    html_bytes: int
+
+
+class DocumentStoreStats(BaseModel):
+    document_count: int
+    total_bytes: int
+    max_document_count: int
+    max_total_bytes: int
+    ttl_seconds: float | None = None
+    created_documents: int
+    evicted_documents: int
+    expired_documents: int
+    rejected_documents: int
+
+
+class ServerConfigurationSummary(BaseModel):
+    default_transport: Literal["stdio", "http", "sse", "streamable-http"]
+    default_host: str
+    default_port: int
+    default_path: str | None = None
+    log_level: str
+    mask_error_details: bool
+    strict_input_validation: bool
+    http_health_path: str
+    http_ready_path: str
+    readiness_require_cdp: bool
+    readiness_cdp_ws_endpoint: str
+    readiness_probe_timeout_seconds: float
+    document_max_count: int
+    document_max_total_bytes: int
+    document_ttl_seconds: float | None = None
+
+
+class ServerHealthReport(BaseModel):
+    status: Literal["ok", "degraded"]
+    ready: bool
+    checked_at: str
+    process_started_at: str
+    uptime_seconds: float
+    cdp_required: bool
+    cdp_ok: bool | None = None
+    cdp_error: str | None = None
+    document_store: DocumentStoreStats
+
+
+class ServerStatusResult(BaseModel):
+    server_name: str
+    server_version: str
+    process_started_at: str
+    uptime_seconds: float
+    configuration: ServerConfigurationSummary
+    document_store: DocumentStoreStats
+    health: ServerHealthReport | None = None
+    documents: list[StoredDocumentInfo] = Field(default_factory=list)
 
 
 class DocumentSummary(BaseModel):
@@ -452,6 +686,10 @@ class CrawlBlueprint(BaseModel):
             and self.delay_min_seconds > self.delay_max_seconds
         ):
             raise ValueError("delay_min_seconds must be <= delay_max_seconds.")
+        for index, start_url in enumerate(self.start_urls):
+            _validate_http_url(start_url, field_name=f"start_urls[{index}]")
+        if self.transport == CrawlTransport.cdp:
+            _validate_ws_url(self.cdp_ws_endpoint, field_name="cdp_ws_endpoint")
         return self
 
 
@@ -500,29 +738,105 @@ class SpiderCodeValidationResult(BaseModel):
 class StoredDocument:
     handle: str
     html: str
+    html_bytes: int
     label: str | None = None
     source_url: str | None = None
     stored_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_accessed_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
     fetched_via: str | None = None
     status: int | None = None
     headers: dict[str, str] = field(default_factory=dict)
 
-    def info(self) -> StoredDocumentInfo:
+    def touch(self, at: datetime | None = None) -> None:
+        self.last_accessed_at = at or datetime.now(timezone.utc)
+
+    def expires_at(self, ttl_seconds: float | None) -> datetime | None:
+        if ttl_seconds is None:
+            return None
+        return self.last_accessed_at + timedelta(seconds=ttl_seconds)
+
+    def info(self, ttl_seconds: float | None) -> StoredDocumentInfo:
         return StoredDocumentInfo(
             handle=self.handle,
             label=self.label,
             source_url=self.source_url,
             stored_at=self.stored_at.isoformat(),
+            last_accessed_at=self.last_accessed_at.isoformat(),
+            expires_at=(
+                self.expires_at(ttl_seconds).isoformat()
+                if self.expires_at(ttl_seconds) is not None
+                else None
+            ),
             fetched_via=self.fetched_via,
             status=self.status,
             html_chars=len(self.html),
+            html_bytes=self.html_bytes,
         )
 
 
 class DocumentStore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_document_count: int,
+        max_total_bytes: int,
+        ttl_seconds: float | None,
+    ) -> None:
         self._lock = threading.Lock()
         self._documents: dict[str, StoredDocument] = {}
+        self._max_document_count = max_document_count
+        self._max_total_bytes = max_total_bytes
+        self._ttl_seconds = ttl_seconds
+        self._total_bytes = 0
+        self._created_documents = 0
+        self._evicted_documents = 0
+        self._expired_documents = 0
+        self._rejected_documents = 0
+
+    def _is_expired(self, document: StoredDocument, now: datetime) -> bool:
+        expires_at = document.expires_at(self._ttl_seconds)
+        return expires_at is not None and expires_at <= now
+
+    def _remove_document_locked(
+        self,
+        handle: str,
+        *,
+        reason: Literal["expired", "evicted"] | None = None,
+    ) -> StoredDocument | None:
+        document = self._documents.pop(handle, None)
+        if document is None:
+            return None
+        self._total_bytes = max(0, self._total_bytes - document.html_bytes)
+        if reason == "expired":
+            self._expired_documents += 1
+        elif reason == "evicted":
+            self._evicted_documents += 1
+        return document
+
+    def _prune_expired_locked(self, now: datetime) -> None:
+        expired_handles = [
+            handle
+            for handle, document in self._documents.items()
+            if self._is_expired(document, now)
+        ]
+        for handle in expired_handles:
+            self._remove_document_locked(handle, reason="expired")
+
+    def _evict_one_locked(self) -> bool:
+        if not self._documents:
+            return False
+        handle, _document = min(
+            self._documents.items(),
+            key=lambda item: (
+                item[1].last_accessed_at,
+                item[1].stored_at,
+                item[0],
+            ),
+        )
+        self._remove_document_locked(handle, reason="evicted")
+        return True
 
     def add(
         self,
@@ -534,45 +848,98 @@ class DocumentStore:
         status: int | None = None,
         headers: dict[str, str] | None = None,
     ) -> StoredDocument:
+        now = datetime.now(timezone.utc)
+        html_bytes = len(html.encode("utf-8"))
+        if html_bytes > self._max_total_bytes:
+            with self._lock:
+                self._rejected_documents += 1
+            raise ValueError(
+                "Document is too large for the configured in-memory cache budget."
+            )
+
         handle = uuid.uuid4().hex[:12]
         document = StoredDocument(
             handle=handle,
             html=html,
+            html_bytes=html_bytes,
             label=label,
             source_url=source_url,
+            stored_at=now,
+            last_accessed_at=now,
             fetched_via=fetched_via,
             status=status,
             headers=dict(headers or {}),
         )
         with self._lock:
+            self._prune_expired_locked(now)
+            while (
+                len(self._documents) >= self._max_document_count
+                or self._total_bytes + document.html_bytes > self._max_total_bytes
+            ):
+                if not self._evict_one_locked():
+                    break
             self._documents[handle] = document
+            self._total_bytes += document.html_bytes
+            self._created_documents += 1
         return document
 
     def get(self, handle: str) -> StoredDocument:
         with self._lock:
+            now = datetime.now(timezone.utc)
+            self._prune_expired_locked(now)
             document = self._documents.get(handle)
+            if document is not None:
+                document.touch(now)
         if document is None:
             raise ValueError(f"Unknown document handle: {handle}")
         return document
 
     def list(self) -> list[StoredDocument]:
         with self._lock:
+            self._prune_expired_locked(datetime.now(timezone.utc))
             documents = list(self._documents.values())
-        documents.sort(key=lambda doc: doc.stored_at, reverse=True)
+        documents.sort(
+            key=lambda doc: (
+                doc.last_accessed_at,
+                doc.stored_at,
+                doc.handle,
+            ),
+            reverse=True,
+        )
         return documents
 
     def delete(self, handle: str) -> bool:
         with self._lock:
-            return self._documents.pop(handle, None) is not None
+            return self._remove_document_locked(handle) is not None
 
     def clear(self) -> int:
         with self._lock:
             deleted = len(self._documents)
             self._documents.clear()
+            self._total_bytes = 0
         return deleted
 
+    def stats(self) -> DocumentStoreStats:
+        with self._lock:
+            self._prune_expired_locked(datetime.now(timezone.utc))
+            return DocumentStoreStats(
+                document_count=len(self._documents),
+                total_bytes=self._total_bytes,
+                max_document_count=self._max_document_count,
+                max_total_bytes=self._max_total_bytes,
+                ttl_seconds=self._ttl_seconds,
+                created_documents=self._created_documents,
+                evicted_documents=self._evicted_documents,
+                expired_documents=self._expired_documents,
+                rejected_documents=self._rejected_documents,
+            )
 
-DOCUMENT_STORE = DocumentStore()
+
+DOCUMENT_STORE = DocumentStore(
+    max_document_count=SERVER_SETTINGS.document_max_count,
+    max_total_bytes=SERVER_SETTINGS.document_max_total_bytes,
+    ttl_seconds=SERVER_SETTINGS.document_ttl_seconds,
+)
 EMULATION_NAMES = sorted(name for name in dir(Emulation) if not name.startswith("_"))
 
 
@@ -645,6 +1012,119 @@ def _normalize_emulation(name: str) -> Emulation:
         raise ValueError(
             f"Unknown emulation '{name}'. Available values: {choices}"
         ) from exc
+
+
+def _validate_http_url(url: str, *, field_name: str) -> None:
+    _validate_url(url, field_name=field_name, schemes={"http", "https"})
+
+
+def _validate_ws_url(url: str, *, field_name: str) -> None:
+    _validate_url(url, field_name=field_name, schemes={"ws", "wss"})
+
+
+def _uptime_seconds(now: datetime | None = None) -> float:
+    current_time = now or datetime.now(timezone.utc)
+    return round((current_time - PROCESS_STARTED_AT).total_seconds(), 3)
+
+
+def _server_configuration_summary() -> ServerConfigurationSummary:
+    return ServerConfigurationSummary(
+        default_transport=SERVER_SETTINGS.default_transport,
+        default_host=SERVER_SETTINGS.default_host,
+        default_port=SERVER_SETTINGS.default_port,
+        default_path=SERVER_SETTINGS.default_path,
+        log_level=SERVER_SETTINGS.log_level,
+        mask_error_details=SERVER_SETTINGS.mask_error_details,
+        strict_input_validation=SERVER_SETTINGS.strict_input_validation,
+        http_health_path=SERVER_SETTINGS.http_health_path,
+        http_ready_path=SERVER_SETTINGS.http_ready_path,
+        readiness_require_cdp=SERVER_SETTINGS.readiness_require_cdp,
+        readiness_cdp_ws_endpoint=SERVER_SETTINGS.readiness_cdp_ws_endpoint,
+        readiness_probe_timeout_seconds=SERVER_SETTINGS.readiness_probe_timeout_seconds,
+        document_max_count=SERVER_SETTINGS.document_max_count,
+        document_max_total_bytes=SERVER_SETTINGS.document_max_total_bytes,
+        document_ttl_seconds=SERVER_SETTINGS.document_ttl_seconds,
+    )
+
+
+async def _probe_cdp_endpoint(
+    *,
+    ws_endpoint: str,
+    timeout_seconds: float,
+) -> tuple[bool, str | None]:
+    client = CDPClient(ws_endpoint=ws_endpoint, timeout=timeout_seconds)
+    try:
+        await client.connect()
+    except Exception as exc:  # pragma: no cover - defensive integration guard
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            await client.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+    return True, None
+
+
+async def _build_health_report(
+    *,
+    require_cdp: bool,
+    probe_cdp: bool,
+    ws_endpoint: str | None = None,
+) -> ServerHealthReport:
+    now = datetime.now(timezone.utc)
+    cdp_ok: bool | None = None
+    cdp_error: str | None = None
+    if probe_cdp or require_cdp:
+        cdp_ok, cdp_error = await _probe_cdp_endpoint(
+            ws_endpoint=ws_endpoint or SERVER_SETTINGS.readiness_cdp_ws_endpoint,
+            timeout_seconds=SERVER_SETTINGS.readiness_probe_timeout_seconds,
+        )
+
+    ready = not require_cdp or bool(cdp_ok)
+    status = "ok" if ready and (cdp_ok is not False) else "degraded"
+    return ServerHealthReport(
+        status=status,
+        ready=ready,
+        checked_at=now.isoformat(),
+        process_started_at=PROCESS_STARTED_AT.isoformat(),
+        uptime_seconds=_uptime_seconds(now),
+        cdp_required=require_cdp,
+        cdp_ok=cdp_ok,
+        cdp_error=cdp_error,
+        document_store=DOCUMENT_STORE.stats(),
+    )
+
+
+def _build_server_status(
+    *,
+    include_documents: bool,
+    health: ServerHealthReport | None = None,
+) -> ServerStatusResult:
+    documents = (
+        [
+            document.info(SERVER_SETTINGS.document_ttl_seconds)
+            for document in DOCUMENT_STORE.list()
+        ]
+        if include_documents
+        else []
+    )
+    return ServerStatusResult(
+        server_name=SERVER_NAME,
+        server_version=SERVER_VERSION,
+        process_started_at=PROCESS_STARTED_AT.isoformat(),
+        uptime_seconds=_uptime_seconds(),
+        configuration=_server_configuration_summary(),
+        document_store=DOCUMENT_STORE.stats(),
+        health=health,
+        documents=documents,
+    )
+
+
+def _configure_logging(level_name: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level_name, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 def _serialize_element(
@@ -964,17 +1444,28 @@ class _CollectItemsPipeline:
 def _build_runtime_request_middlewares(
     blueprint: CrawlBlueprint,
 ) -> list[UserAgentMiddleware | DelayMiddleware]:
-    return [
+    middlewares: list[UserAgentMiddleware | DelayMiddleware] = [
         UserAgentMiddleware(
             blueprint.user_agents or None,
             default=blueprint.default_user_agent,
-        ),
-        DelayMiddleware(
-            delay=blueprint.delay_seconds,
-            min_delay=blueprint.delay_min_seconds,
-            max_delay=blueprint.delay_max_seconds,
-        ),
+        )
     ]
+    if any(
+        delay is not None
+        for delay in (
+            blueprint.delay_seconds,
+            blueprint.delay_min_seconds,
+            blueprint.delay_max_seconds,
+        )
+    ):
+        middlewares.append(
+            DelayMiddleware(
+                delay=blueprint.delay_seconds,
+                min_delay=blueprint.delay_min_seconds,
+                max_delay=blueprint.delay_max_seconds,
+            )
+        )
+    return middlewares
 
 
 def _build_runtime_response_middlewares(
@@ -1249,13 +1740,23 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
                 UserAgentMiddleware(
                     BLUEPRINT.get("user_agents") or None,
                     default=BLUEPRINT.get("default_user_agent"),
-                ),
-                DelayMiddleware(
-                    delay=BLUEPRINT.get("delay_seconds"),
-                    min_delay=BLUEPRINT.get("delay_min_seconds"),
-                    max_delay=BLUEPRINT.get("delay_max_seconds"),
-                ),
+                )
             ]
+            if any(
+                value is not None
+                for value in (
+                    BLUEPRINT.get("delay_seconds"),
+                    BLUEPRINT.get("delay_min_seconds"),
+                    BLUEPRINT.get("delay_max_seconds"),
+                )
+            ):
+                request_mw.append(
+                    DelayMiddleware(
+                        delay=BLUEPRINT.get("delay_seconds"),
+                        min_delay=BLUEPRINT.get("delay_min_seconds"),
+                        max_delay=BLUEPRINT.get("delay_max_seconds"),
+                    )
+                )
             response_mw = [
                 RetryMiddleware(
                     max_times=BLUEPRINT.get("retry_max_times", 3),
@@ -1297,9 +1798,12 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
                 html_max_size_bytes=BLUEPRINT["html_max_size_bytes"],
             )
             await cdp_client.connect()
-            await engine.http.close()
-            engine.http = cdp_client
-            await engine.run()
+            try:
+                await engine.http.close()
+                engine.http = cdp_client
+                await engine.run()
+            finally:
+                await cdp_client.close()
 
 
         if __name__ == "__main__":
@@ -1311,13 +1815,23 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
                 UserAgentMiddleware(
                     BLUEPRINT.get("user_agents") or None,
                     default=BLUEPRINT.get("default_user_agent"),
-                ),
-                DelayMiddleware(
-                    delay=BLUEPRINT.get("delay_seconds"),
-                    min_delay=BLUEPRINT.get("delay_min_seconds"),
-                    max_delay=BLUEPRINT.get("delay_max_seconds"),
-                ),
+                )
             ]
+            if any(
+                value is not None
+                for value in (
+                    BLUEPRINT.get("delay_seconds"),
+                    BLUEPRINT.get("delay_min_seconds"),
+                    BLUEPRINT.get("delay_max_seconds"),
+                )
+            ):
+                request_mw.append(
+                    DelayMiddleware(
+                        delay=BLUEPRINT.get("delay_seconds"),
+                        min_delay=BLUEPRINT.get("delay_min_seconds"),
+                        max_delay=BLUEPRINT.get("delay_max_seconds"),
+                    )
+                )
             response_mw = [
                 RetryMiddleware(
                     max_times=BLUEPRINT.get("retry_max_times", 3),
@@ -1379,7 +1893,10 @@ def store_html_document(
 @mcp.tool(tags={"documents"})
 def list_documents() -> list[StoredDocumentInfo]:
     """List cached documents that can be reused by handle in later tool calls."""
-    return [document.info() for document in DOCUMENT_STORE.list()]
+    return [
+        document.info(SERVER_SETTINGS.document_ttl_seconds)
+        for document in DOCUMENT_STORE.list()
+    ]
 
 
 @mcp.tool(tags={"documents"})
@@ -1392,6 +1909,19 @@ def delete_document(handle: str) -> DeleteDocumentResult:
 def clear_documents() -> ClearDocumentsResult:
     """Clear every cached document from the in-memory store."""
     return ClearDocumentsResult(deleted_count=DOCUMENT_STORE.clear())
+
+
+@mcp.tool(tags={"diagnostics", "ops"})
+async def server_status(
+    include_documents: bool = False,
+    probe_cdp: bool = False,
+) -> ServerStatusResult:
+    """Return runtime status, cache metrics, and optional CDP readiness information."""
+    health = await _build_health_report(
+        require_cdp=SERVER_SETTINGS.readiness_require_cdp,
+        probe_cdp=SERVER_SETTINGS.readiness_require_cdp or probe_cdp,
+    )
+    return _build_server_status(include_documents=include_documents, health=health)
 
 
 @mcp.tool(tags={"inspect", "selectors"})
@@ -1622,6 +2152,7 @@ async def silkworm_fetch(
     body_preview_chars: int = DEFAULT_HTML_PREVIEW_CHARS,
 ) -> FetchResult:
     """Fetch a page through silkworm's HttpClient and optionally cache the HTML for later selector work."""
+    _validate_http_url(url, field_name="url")
     if body_text is not None and body_json is not None:
         raise ValueError("Provide only one of 'body_text' or 'body_json'.")
 
@@ -1702,6 +2233,8 @@ async def silkworm_fetch_cdp(
     body_preview_chars: int = DEFAULT_HTML_PREVIEW_CHARS,
 ) -> FetchResult:
     """Fetch rendered HTML through silkworm's CDP client for JavaScript-heavy pages."""
+    _validate_http_url(url, field_name="url")
+    _validate_ws_url(ws_endpoint, field_name="ws_endpoint")
     result, _html = await _fetch_html_via_cdp(
         url=url,
         ws_endpoint=ws_endpoint,
@@ -1732,6 +2265,8 @@ async def query_selector_cdp(
     truncate_on_limit: bool = False,
 ) -> SelectorQueryResult:
     """Fetch a rendered page through CDP, then run a CSS or XPath query on the live DOM snapshot."""
+    _validate_http_url(url, field_name="url")
+    _validate_ws_url(ws_endpoint, field_name="ws_endpoint")
     fetch_result, html = await _fetch_html_via_cdp(
         url=url,
         ws_endpoint=ws_endpoint,
@@ -1787,6 +2322,8 @@ async def extract_structured_data_cdp(
     truncate_on_limit: bool = False,
 ) -> LivePageExtractionResult:
     """Fetch a rendered page through CDP and extract structured records from the rendered DOM."""
+    _validate_http_url(url, field_name="url")
+    _validate_ws_url(ws_endpoint, field_name="ws_endpoint")
     _validate_optional_query_pair(item_selector, item_xpath, "item_selector/item_xpath")
     fetch_result, html = await _fetch_html_via_cdp(
         url=url,
@@ -2045,12 +2582,17 @@ async def run_crawl_blueprint(blueprint: CrawlBlueprint) -> CrawlRunResult:
         log_stats_interval=blueprint.log_stats_interval,
         keep_alive=blueprint.keep_alive,
     )
-    if blueprint.transport == CrawlTransport.cdp:
-        cdp_client = _build_cdp_client(blueprint)
-        await cdp_client.connect()
-        await engine.http.close()
-        engine.http = cdp_client
-    await engine.run()
+    cdp_client: CDPClient | None = None
+    try:
+        if blueprint.transport == CrawlTransport.cdp:
+            cdp_client = _build_cdp_client(blueprint)
+            await cdp_client.connect()
+            await engine.http.close()
+            engine.http = cdp_client
+        await engine.run()
+    finally:
+        if cdp_client is not None:
+            await cdp_client.close()
     return CrawlRunResult(
         spider_name=blueprint.spider_name,
         scheduled_requests=spider._scheduled_requests,
@@ -2075,6 +2617,41 @@ def generate_spider_template(
     )
 
 
+@mcp.custom_route(
+    SERVER_SETTINGS.http_health_path,
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def http_health(_request: StarletteRequest) -> Response:
+    health = await _build_health_report(require_cdp=False, probe_cdp=False)
+    return JSONResponse(health.model_dump(mode="json"), status_code=200)
+
+
+@mcp.custom_route(
+    SERVER_SETTINGS.http_ready_path,
+    methods=["GET"],
+    include_in_schema=False,
+)
+async def http_readiness(_request: StarletteRequest) -> Response:
+    health = await _build_health_report(
+        require_cdp=SERVER_SETTINGS.readiness_require_cdp,
+        probe_cdp=SERVER_SETTINGS.readiness_require_cdp,
+    )
+    return JSONResponse(
+        health.model_dump(mode="json"),
+        status_code=200 if health.ready else 503,
+    )
+
+
+@mcp.resource(
+    "silkworm://status",
+    mime_type="application/json",
+)
+def status_resource() -> str:
+    payload = _build_server_status(include_documents=True)
+    return json.dumps(payload.model_dump(mode="json"), indent=2)
+
+
 @mcp.resource("silkworm://reference/overview")
 def reference_overview() -> str:
     return dedent(
@@ -2089,18 +2666,20 @@ def reference_overview() -> str:
         - Help LLMs move from "I need a scraper" to "here is a working spider blueprint or template".
 
         Suggested workflow:
-        1. `silkworm_fetch` or `silkworm_fetch_cdp`
-        2. `inspect_document`
-        3. `query_selector` and `compare_selectors`
-        4. `query_selector_cdp` or `extract_structured_data_cdp` for rendered-page debugging
-        5. `extract_links` for pagination/detail URL discovery
-        6. `run_crawl_blueprint`
-        7. `generate_spider_template`
-        8. `validate_spider_code`
+        1. `server_status` for runtime diagnostics when needed
+        2. `silkworm_fetch` or `silkworm_fetch_cdp`
+        3. `inspect_document`
+        4. `query_selector` and `compare_selectors`
+        5. `query_selector_cdp` or `extract_structured_data_cdp` for rendered-page debugging
+        6. `extract_links` for pagination/detail URL discovery
+        7. `run_crawl_blueprint`
+        8. `generate_spider_template`
+        9. `validate_spider_code`
 
         Document handles:
         - Most tools accept either `document_handle` or raw `html`.
         - Prefer handles so clients do not resend large HTML payloads.
+        - HTTP transports also expose `{SERVER_SETTINGS.http_health_path}` and `{SERVER_SETTINGS.http_ready_path}`.
         """
     ).strip()
 
@@ -2174,7 +2753,8 @@ def crawl_blueprint_schema() -> str:
 )
 def documents_resource() -> str:
     payload = [
-        document.info().model_dump(mode="json") for document in DOCUMENT_STORE.list()
+        document.info(SERVER_SETTINGS.document_ttl_seconds).model_dump(mode="json")
+        for document in DOCUMENT_STORE.list()
     ]
     return json.dumps(payload, indent=2)
 
@@ -2256,26 +2836,37 @@ def main() -> None:
     parser.add_argument(
         "--transport",
         choices=["stdio", "http", "sse", "streamable-http"],
-        default="stdio",
+        default=SERVER_SETTINGS.default_transport,
         help="MCP transport to run.",
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
+        default=SERVER_SETTINGS.default_host,
         help="Host for HTTP-based transports.",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=SERVER_SETTINGS.default_port,
         help="Port for HTTP-based transports.",
     )
     parser.add_argument(
         "--path",
-        default=None,
+        default=SERVER_SETTINGS.default_path,
         help="Optional MCP endpoint path for HTTP-based transports.",
     )
     args = parser.parse_args()
+    _configure_logging(SERVER_SETTINGS.log_level)
+
+    logger.info(
+        "starting %s version=%s transport=%s host=%s port=%s path=%s",
+        SERVER_NAME,
+        SERVER_VERSION,
+        args.transport,
+        args.host,
+        args.port,
+        args.path,
+    )
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")

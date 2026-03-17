@@ -15,5 +15,9 @@ silkworm-mcp = "mcp_server:main"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.4.2",
     "ruff>=0.15.6",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
