@@ -2,6 +2,9 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[options]
+prerelease-mode = "allow"
+
 [[package]]
 name = "aiofile"
 version = "3.9.0"
@@ -1026,7 +1029,7 @@ wheels = [
 
 [[package]]
 name = "silkworm-mcp"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -1046,7 +1049,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.1.1" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "scraper-rust", specifier = ">=0.4.1" },
-    { name = "silkworm-rs", specifier = ">=0.3.7" },
+    { name = "silkworm-rs", specifier = ">=0.4.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1057,7 +1060,7 @@ dev = [
 
 [[package]]
 name = "silkworm-rs"
-version = "0.3.7"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "charset-normalizer" },
@@ -1066,9 +1069,9 @@ dependencies = [
     { name = "rxml" },
     { name = "scraper-rust" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/57/55/dd1201d48d8964712358d14c6178aef3136283ef7bf02026b0465a12e108/silkworm_rs-0.3.7.tar.gz", hash = "sha256:c47eee0e5f0a39ced941fc8e42a31a2a22722e70b16d6d8d2cacd86a381ef81e", size = 261905, upload-time = "2026-03-17T13:25:00.725Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6e/d5/ccfff992679c08f77d677d16bb4c97ab0a129b856b16b729e527be430d9e/silkworm_rs-0.4.0.tar.gz", hash = "sha256:713a6f0b69c6c917fbfab166dc391d55648f8f16617bd95dc687ee7b0eac0559", size = 262076, upload-time = "2026-03-17T16:48:11.963Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/52/6aec65edff7227b6a21d19667e7b2d2d57dc73a000e5c8618f9dcb57d524/silkworm_rs-0.3.7-py3-none-any.whl", hash = "sha256:970da23ac7b143c427a7fd339c6fbc7f635af68e2c225d1b5e0d59551021d6db", size = 57769, upload-time = "2026-03-17T13:24:59.127Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/5a/0fa4674420e2df41cb827edab3512a0ccff0a787d9f68a55103f8b3187fc/silkworm_rs-0.4.0-py3-none-any.whl", hash = "sha256:c73525e84c830d71767ee6e63ed71ad17f36ebc840051c4136ca80441cfbf83d", size = 57873, upload-time = "2026-03-17T16:48:10.405Z" },
 ]
 
 [[package]]
