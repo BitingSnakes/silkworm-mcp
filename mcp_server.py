@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import threading
@@ -8,8 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from pprint import pformat
-from textwrap import dedent
+from textwrap import dedent, indent
 from typing import Any, Literal
 from urllib.parse import urljoin
 
@@ -458,6 +458,32 @@ class SpiderTemplateResult(BaseModel):
     code: str
 
 
+class LivePageExtractionResult(BaseModel):
+    url: str
+    final_url: str
+    status: int | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    via: Literal["cdp"] = "cdp"
+    document_handle: str | None = None
+    summary: DocumentSummary
+    scope_mode: SelectorMode | None = None
+    scope_query: str | None = None
+    total_scopes: int
+    returned_items: int
+    omitted_items: int
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SpiderCodeValidationResult(BaseModel):
+    syntax_ok: bool
+    spider_classes: list[str] = Field(default_factory=list)
+    imports_silkworm: bool = False
+    uses_cdp_client: bool = False
+    uses_run_spider: bool = False
+    uses_run_spider_uvloop: bool = False
+    issues: list[str] = Field(default_factory=list)
+
+
 @dataclass(slots=True)
 class StoredDocument:
     handle: str
@@ -838,6 +864,78 @@ async def _extract_item(
     return item
 
 
+def _extract_static_field_value(
+    scope: Any,
+    field_spec: CrawlFieldSpec,
+    *,
+    base_url: str,
+) -> Any:
+    if _is_synthetic_source_url_field(field_spec) and not (
+        field_spec.css or field_spec.xpath
+    ):
+        return base_url or field_spec.default
+
+    mode, query = _query_pair_to_mode_and_query(
+        css=field_spec.css,
+        xpath=field_spec.xpath,
+    ) or (None, None)
+    if mode is None or query is None:
+        return field_spec.default
+
+    if field_spec.all_matches:
+        nodes = scope.select(query) if mode == SelectorMode.css else scope.xpath(query)
+    else:
+        node = (
+            scope.select_first(query)
+            if mode == SelectorMode.css
+            else scope.xpath_first(query)
+        )
+        nodes = [node] if node is not None else []
+
+    values: list[Any] = []
+    for node in nodes:
+        if field_spec.extractor == FieldExtractor.text:
+            value = getattr(node, "text", "")
+        elif field_spec.extractor == FieldExtractor.html:
+            value = getattr(node, "html", "")
+        else:
+            value = node.attr(field_spec.attr_name or "")
+
+        if value is None:
+            continue
+        if isinstance(value, str) and field_spec.strip:
+            value = value.strip()
+        if field_spec.absolute_url and isinstance(value, str):
+            value = urljoin(base_url, value)
+        values.append(value)
+
+    if not values:
+        return field_spec.default
+
+    if field_spec.all_matches:
+        if field_spec.join_with is not None:
+            return field_spec.join_with.join(str(value) for value in values)
+        return values
+
+    return values[0]
+
+
+def _extract_static_item(
+    scope: Any,
+    fields: list[CrawlFieldSpec],
+    *,
+    base_url: str,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {}
+    for field_spec in fields:
+        item[field_spec.name] = _extract_static_field_value(
+            scope,
+            field_spec,
+            base_url=base_url,
+        )
+    return item
+
+
 class _CollectItemsPipeline:
     def __init__(self) -> None:
         self.items: list[dict[str, Any]] = []
@@ -898,12 +996,103 @@ def _build_cdp_client(blueprint: CrawlBlueprint) -> CDPClient:
     )
 
 
+async def _fetch_html_via_cdp(
+    *,
+    url: str,
+    ws_endpoint: str,
+    timeout_seconds: float | None,
+    headers: dict[str, str] | None = None,
+    store_document: bool,
+    label: str | None,
+    body_preview_chars: int = DEFAULT_HTML_PREVIEW_CHARS,
+) -> tuple[FetchResult, str]:
+    client = CDPClient(
+        ws_endpoint=ws_endpoint,
+        timeout=timeout_seconds,
+    )
+    try:
+        await client.connect()
+        response = await client.fetch(Request(url=url, headers=dict(headers or {})))
+        try:
+            html = response.text
+            stored_document: StoredDocument | None = None
+            summary: DocumentSummary
+            if store_document:
+                stored_document = _store_document(
+                    html,
+                    label=label,
+                    source_url=response.url,
+                    fetched_via="cdp",
+                    status=response.status,
+                    headers=response.headers,
+                )
+                summary = _build_summary(
+                    html,
+                    handle=stored_document.handle,
+                    label=stored_document.label,
+                    source_url=stored_document.source_url,
+                    fetched_via=stored_document.fetched_via,
+                    status=stored_document.status,
+                )
+            else:
+                summary = _build_summary(
+                    html,
+                    source_url=response.url,
+                    fetched_via="cdp",
+                    status=response.status,
+                )
+
+            result = FetchResult(
+                url=url,
+                final_url=response.url,
+                method="GET",
+                status=response.status,
+                is_html=True,
+                via="cdp",
+                headers=response.headers,
+                body_chars=len(html),
+                body_preview=_clip(html, body_preview_chars),
+                document_handle=stored_document.handle if stored_document else None,
+                summary=summary,
+            )
+            return result, html
+        finally:
+            response.close()
+    finally:
+        await client.close()
+
+
+def _summarize_selector_matches(
+    matches: list[Any],
+    *,
+    limit: int,
+    include_html: bool,
+    text_chars: int,
+    html_chars: int,
+) -> tuple[int, int, int, list[SelectorMatch]]:
+    limited_matches = matches[:limit]
+    return (
+        len(matches),
+        len(limited_matches),
+        max(0, len(matches) - len(limited_matches)),
+        [
+            _serialize_element(
+                match,
+                index=index,
+                include_html=include_html,
+                text_chars=text_chars,
+                html_chars=html_chars,
+            )
+            for index, match in enumerate(limited_matches)
+        ],
+    )
+
+
 def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
     safe_class_name = _normalize_identifier(class_name)
-    blueprint_literal = pformat(
-        blueprint.model_dump(mode="python"),
-        sort_dicts=False,
-        width=88,
+    blueprint_json = indent(
+        json.dumps(blueprint.model_dump(mode="json"), indent=2),
+        " " * 8,
     )
     runner_name = "run_spider_uvloop" if blueprint.use_uvloop_runner else "run_spider"
     return dedent(
@@ -911,6 +1100,7 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
         from __future__ import annotations
 
         import asyncio
+        import json
         from urllib.parse import urljoin
 
         from silkworm import Engine, HTMLResponse, Request, Spider, {runner_name}
@@ -919,7 +1109,9 @@ def _render_spider_template(blueprint: CrawlBlueprint, class_name: str) -> str:
         from silkworm.pipelines import JsonLinesPipeline
 
 
-        BLUEPRINT = {blueprint_literal}
+        BLUEPRINT = json.loads(
+{blueprint_json}
+        )
 
 
         class {safe_class_name}(Spider):
@@ -1498,61 +1690,227 @@ async def silkworm_fetch_cdp(
     url: str,
     ws_endpoint: str = "ws://127.0.0.1:9222",
     timeout_seconds: float | None = 20.0,
+    headers: dict[str, str] | None = None,
     store_document: bool = True,
     label: str | None = None,
     body_preview_chars: int = DEFAULT_HTML_PREVIEW_CHARS,
 ) -> FetchResult:
     """Fetch rendered HTML through silkworm's CDP client for JavaScript-heavy pages."""
-    client = CDPClient(
+    result, _html = await _fetch_html_via_cdp(
+        url=url,
         ws_endpoint=ws_endpoint,
-        timeout=timeout_seconds,
+        timeout_seconds=timeout_seconds,
+        headers=headers,
+        store_document=store_document,
+        label=label,
+        body_preview_chars=body_preview_chars,
+    )
+    return result
+
+
+@mcp.tool(tags={"fetch", "silkworm", "cdp", "selectors"})
+async def query_selector_cdp(
+    url: str,
+    query: str,
+    mode: SelectorMode = SelectorMode.css,
+    ws_endpoint: str = "ws://127.0.0.1:9222",
+    timeout_seconds: float | None = 20.0,
+    headers: dict[str, str] | None = None,
+    store_document: bool = True,
+    label: str | None = None,
+    limit: int = 20,
+    include_html: bool = True,
+    text_chars: int = 300,
+    html_chars: int = 700,
+    max_size_bytes: int = DEFAULT_HTML_MAX_SIZE_BYTES,
+    truncate_on_limit: bool = False,
+) -> SelectorQueryResult:
+    """Fetch a rendered page through CDP, then run a CSS or XPath query on the live DOM snapshot."""
+    fetch_result, html = await _fetch_html_via_cdp(
+        url=url,
+        ws_endpoint=ws_endpoint,
+        timeout_seconds=timeout_seconds,
+        headers=headers,
+        store_document=store_document,
+        label=label,
+    )
+    document = scraper_rs.Document(
+        html,
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
     )
     try:
-        await client.connect()
-        response = await client.fetch(Request(url=url))
-        html = response.text
-        stored_document: StoredDocument | None = None
-        summary: DocumentSummary | None = None
-        if store_document:
-            stored_document = _store_document(
-                html,
-                label=label,
-                source_url=response.url,
-                fetched_via="cdp",
-                status=response.status,
-                headers=response.headers,
+        matches = _query_document(document, query=query, mode=mode)
+        total_matches, returned_matches, omitted_matches, serialized_matches = (
+            _summarize_selector_matches(
+                matches,
+                limit=limit,
+                include_html=include_html,
+                text_chars=text_chars,
+                html_chars=html_chars,
             )
-            summary = _build_summary(
-                html,
-                handle=stored_document.handle,
-                label=stored_document.label,
-                source_url=stored_document.source_url,
-                fetched_via=stored_document.fetched_via,
-                status=stored_document.status,
-            )
-        else:
-            summary = _build_summary(
-                html,
-                source_url=response.url,
-                fetched_via="cdp",
-                status=response.status,
-            )
-
-        return FetchResult(
-            url=url,
-            final_url=response.url,
-            method="GET",
-            status=response.status,
-            is_html=True,
-            via="cdp",
-            headers=response.headers,
-            body_chars=len(html),
-            body_preview=_clip(html, body_preview_chars),
-            document_handle=stored_document.handle if stored_document else None,
-            summary=summary,
+        )
+        return SelectorQueryResult(
+            document_handle=fetch_result.document_handle,
+            source_url=fetch_result.final_url,
+            mode=mode,
+            query=query,
+            total_matches=total_matches,
+            returned_matches=returned_matches,
+            omitted_matches=omitted_matches,
+            matches=serialized_matches,
         )
     finally:
-        await client.close()
+        document.close()
+
+
+@mcp.tool(tags={"fetch", "silkworm", "cdp", "extract"})
+async def extract_structured_data_cdp(
+    url: str,
+    fields: list[CrawlFieldSpec],
+    item_selector: str | None = None,
+    item_xpath: str | None = None,
+    ws_endpoint: str = "ws://127.0.0.1:9222",
+    timeout_seconds: float | None = 20.0,
+    headers: dict[str, str] | None = None,
+    store_document: bool = True,
+    label: str | None = None,
+    item_limit: int = 25,
+    include_source_url: bool = True,
+    max_size_bytes: int = DEFAULT_HTML_MAX_SIZE_BYTES,
+    truncate_on_limit: bool = False,
+) -> LivePageExtractionResult:
+    """Fetch a rendered page through CDP and extract structured records from the rendered DOM."""
+    _validate_optional_query_pair(item_selector, item_xpath, "item_selector/item_xpath")
+    fetch_result, html = await _fetch_html_via_cdp(
+        url=url,
+        ws_endpoint=ws_endpoint,
+        timeout_seconds=timeout_seconds,
+        headers=headers,
+        store_document=store_document,
+        label=label,
+    )
+    document = scraper_rs.Document(
+        html,
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+    try:
+        item_query = _query_pair_to_mode_and_query(css=item_selector, xpath=item_xpath)
+        if item_query is None:
+            scopes = [document]
+            scope_mode: SelectorMode | None = None
+            scope_query: str | None = None
+        else:
+            scope_mode, scope_query = item_query
+            scopes = _query_document(document, query=scope_query, mode=scope_mode)
+
+        items: list[dict[str, Any]] = []
+        for scope in scopes[:item_limit]:
+            item = _extract_static_item(
+                scope,
+                fields,
+                base_url=fetch_result.final_url,
+            )
+            if include_source_url:
+                item["_source_url"] = fetch_result.final_url
+            items.append(item)
+
+        return LivePageExtractionResult(
+            url=url,
+            final_url=fetch_result.final_url,
+            status=fetch_result.status,
+            headers=fetch_result.headers,
+            document_handle=fetch_result.document_handle,
+            summary=fetch_result.summary or _build_summary(
+                html,
+                source_url=fetch_result.final_url,
+                fetched_via="cdp",
+                status=fetch_result.status,
+            ),
+            scope_mode=scope_mode,
+            scope_query=scope_query,
+            total_scopes=len(scopes),
+            returned_items=len(items),
+            omitted_items=max(0, len(scopes) - len(items)),
+            items=items,
+        )
+    finally:
+        document.close()
+
+
+@mcp.tool(tags={"templates", "code", "validation"})
+def validate_spider_code(
+    code: str,
+    expected_class_name: str | None = None,
+) -> SpiderCodeValidationResult:
+    """Statically validate generated spider code for syntax and common silkworm/CDP wiring."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        issue = f"Syntax error at line {exc.lineno}, column {exc.offset}: {exc.msg}"
+        return SpiderCodeValidationResult(syntax_ok=False, issues=[issue])
+
+    spider_classes: list[str] = []
+    imports_silkworm = False
+    uses_cdp_client = False
+    uses_run_spider = False
+    uses_run_spider_uvloop = False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("silkworm"):
+                    imports_silkworm = True
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").startswith("silkworm"):
+                imports_silkworm = True
+        elif isinstance(node, ast.ClassDef):
+            base_names = set()
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    base_names.add(base.id)
+                elif isinstance(base, ast.Attribute):
+                    base_names.add(base.attr)
+            if "Spider" in base_names:
+                spider_classes.append(node.name)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            func_name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if func_name == "CDPClient":
+                uses_cdp_client = True
+            elif func_name == "run_spider":
+                uses_run_spider = True
+            elif func_name == "run_spider_uvloop":
+                uses_run_spider_uvloop = True
+
+    issues: list[str] = []
+    if not imports_silkworm:
+        issues.append("Code does not import silkworm modules.")
+    if not spider_classes:
+        issues.append("No class inheriting from Spider was found.")
+    if expected_class_name and expected_class_name not in spider_classes:
+        issues.append(
+            f"Expected spider class '{expected_class_name}' was not found."
+        )
+    if not (uses_run_spider or uses_run_spider_uvloop):
+        issues.append("No run_spider/run_spider_uvloop entrypoint call was found.")
+
+    return SpiderCodeValidationResult(
+        syntax_ok=True,
+        spider_classes=spider_classes,
+        imports_silkworm=imports_silkworm,
+        uses_cdp_client=uses_cdp_client,
+        uses_run_spider=uses_run_spider,
+        uses_run_spider_uvloop=uses_run_spider_uvloop,
+        issues=issues,
+    )
 
 
 @mcp.tool(tags={"crawl", "silkworm"})
@@ -1729,9 +2087,11 @@ def reference_overview() -> str:
         1. `silkworm_fetch` or `silkworm_fetch_cdp`
         2. `inspect_document`
         3. `query_selector` and `compare_selectors`
-        4. `extract_links` for pagination/detail URL discovery
-        5. `run_crawl_blueprint`
-        6. `generate_spider_template`
+        4. `query_selector_cdp` or `extract_structured_data_cdp` for rendered-page debugging
+        5. `extract_links` for pagination/detail URL discovery
+        6. `run_crawl_blueprint`
+        7. `generate_spider_template`
+        8. `validate_spider_code`
 
         Document handles:
         - Most tools accept either `document_handle` or raw `html`.
@@ -1878,6 +2238,7 @@ def debug_selector_strategy(
         - inspect_document
         - query_selector
         - compare_selectors
+        - query_selector_cdp for JS-rendered pages
         - extract_links if navigation is involved
 
         Prefer selectors that are specific enough to avoid false positives but resilient to layout changes.

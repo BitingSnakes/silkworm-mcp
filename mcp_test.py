@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 
+import scraper_rs
+
 from mcp_server import (
     CrawlBlueprint,
     CrawlFieldSpec,
     _extract_item,
+    _extract_static_item,
     generate_spider_template,
     list_documents,
     query_selector,
     store_html_document,
+    validate_spider_code,
 )
 
 SAMPLE_HTML = """
@@ -109,6 +113,31 @@ def main() -> None:
     assert 'output_jsonl_path' in template.code
     assert 'BLUEPRINT.get("transport") == "cdp"' in template.code
     assert "CDPClient(" in template.code
+    validation = validate_spider_code(
+        template.code,
+        expected_class_name="CatalogSpider",
+    )
+    print("template validation syntax:", validation.syntax_ok)
+    print("template validation classes:", validation.spider_classes)
+    assert validation.syntax_ok is True
+    assert validation.uses_cdp_client is True
+    assert validation.uses_run_spider_uvloop is True
+    assert validation.issues == []
+
+    document = scraper_rs.Document(SAMPLE_HTML)
+    try:
+        first_product = document.select_first(".product")
+        assert first_product is not None
+        static_item = _extract_static_item(
+            first_product,
+            blueprint.fields,
+            base_url="https://example.com/catalog",
+        )
+    finally:
+        document.close()
+    print("static detail_url:", static_item["detail_url"])
+    assert static_item["name"] == "Widget A"
+    assert static_item["detail_url"] == "https://example.com/items/1"
 
     synthetic_source_blueprint = CrawlBlueprint(
         start_urls=["https://example.com/catalog"],

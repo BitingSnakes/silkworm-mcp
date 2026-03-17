@@ -10,10 +10,12 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 ## Features
 
 - Fetch pages through silkworm's regular HTTP client or CDP renderer.
+- Query selectors directly against a CDP-rendered DOM snapshot.
+- Extract structured records from live rendered pages before committing to a full crawl.
 - Cache HTML in-memory and reuse it via `document_handle`.
 - Inspect pages with summaries, prettified HTML, CSS/XPath queries, selector comparisons, and link extraction.
 - Run ad hoc crawls from a structured `CrawlBlueprint`.
-- Generate reusable silkworm spider templates from the same blueprint.
+- Generate reusable silkworm spider templates from the same blueprint and statically validate them.
 - Publish MCP resources and prompts so clients can discover workflows and schemas.
 
 ## Tools
@@ -29,8 +31,11 @@ It is designed for LLM-assisted scraper development, so the server exposes both 
 - `extract_links`
 - `silkworm_fetch`
 - `silkworm_fetch_cdp`
+- `query_selector_cdp`
+- `extract_structured_data_cdp`
 - `run_crawl_blueprint`
 - `generate_spider_template`
+- `validate_spider_code`
 
 ## Run
 
@@ -63,9 +68,10 @@ uv run silkworm-mcp --transport stdio
 1. Call `silkworm_fetch` for the target page.
 2. Use the returned `document_handle` with `inspect_document`.
 3. Iterate on `query_selector` and `compare_selectors`.
-4. Use `extract_links` to verify pagination or detail pages.
-5. Feed the stable plan into `run_crawl_blueprint`.
-6. Convert the same blueprint into code with `generate_spider_template`.
+4. For JS-heavy pages, use `query_selector_cdp` or `extract_structured_data_cdp` against the rendered DOM.
+5. Use `extract_links` to verify pagination or detail pages.
+6. Feed the stable plan into `run_crawl_blueprint`.
+7. Convert the same blueprint into code with `generate_spider_template`, then check it with `validate_spider_code`.
 
 ## Blueprint Example
 
