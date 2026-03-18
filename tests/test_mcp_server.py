@@ -4,6 +4,7 @@ import asyncio
 import ast
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -314,6 +315,14 @@ def test_server_status_reports_runtime_snapshot(
     assert status.documents[0].handle == summary.handle
     assert status.health is not None
     assert status.health.ready is True
+
+
+def test_server_version_matches_pyproject() -> None:
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject_path.open("rb") as pyproject_file:
+        pyproject_data = tomllib.load(pyproject_file)
+
+    assert mcp_server.SERVER_VERSION == pyproject_data["project"]["version"]
 
 
 def test_silkworm_fetch_rejects_non_http_urls() -> None:

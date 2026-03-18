@@ -31,6 +31,7 @@ RUN curl -L -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browse
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY src ./src
 COPY mcp_server.py ./
 COPY docker-entrypoint.sh ./
 RUN uv sync --frozen --no-dev

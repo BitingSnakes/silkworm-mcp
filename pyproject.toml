@@ -16,10 +16,13 @@ dependencies = [
 ]
 
 [project.scripts]
-silkworm-mcp = "mcp_server:main"
+silkworm-mcp = "silkworm_mcp.server:main"
 
 [tool.setuptools]
-py-modules = ["mcp_server"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [dependency-groups]
 dev = [

@@ -75,6 +75,60 @@ The project also exposes a console entrypoint:
 uv run silkworm-mcp --transport stdio
 ```
 
+## Docker
+
+Build the image:
+
+```bash
+docker build -t silkworm-mcp .
+```
+
+Run the container over HTTP on port `8000`:
+
+```bash
+docker run --rm -it -p 8000:8000 silkworm-mcp
+```
+
+The container entrypoint starts two processes by default:
+
+- the MCP server over HTTP on `0.0.0.0:8000`
+- a bundled Lightpanda browser on `127.0.0.1:9222` for CDP-backed tools such as `silkworm_fetch_cdp`, `query_selector_cdp`, and `extract_structured_data_cdp`
+
+Useful container environment variables:
+
+- `MCP_TRANSPORT` (default: `http`)
+- `MCP_HOST` (default: `0.0.0.0`)
+- `MCP_PORT` (default: `8000`)
+- `MCP_PATH`
+- `LIGHTPANDA_ENABLED` (default: `1`)
+- `LIGHTPANDA_HOST` (default: `127.0.0.1`)
+- `LIGHTPANDA_PORT` (default: `9222`)
+- `LIGHTPANDA_LOG_FORMAT` (default: `pretty`)
+- `LIGHTPANDA_LOG_LEVEL` (default: `info`)
+
+Example with custom document-cache limits:
+
+```bash
+docker run --rm -it \
+  -p 8000:8000 \
+  -e SILKWORM_MCP_DOCUMENT_MAX_COUNT=256 \
+  -e SILKWORM_MCP_DOCUMENT_MAX_TOTAL_BYTES=64000000 \
+  -e SILKWORM_MCP_DOCUMENT_TTL_SECONDS=7200 \
+  silkworm-mcp
+```
+
+For local development, `compose.yml` provides the same setup with health checks and restart policy:
+
+```bash
+docker compose up --build
+```
+
+Then verify the container is ready:
+
+```bash
+curl http://127.0.0.1:8000/readyz
+```
+
 Key runtime environment variables:
 
 - `SILKWORM_MCP_DOCUMENT_MAX_COUNT`
