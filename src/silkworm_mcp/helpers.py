@@ -12,6 +12,7 @@ from fastmcp.exceptions import ToolError
 from rnet import Emulation
 from silkworm import Request, Spider
 from silkworm.cdp import CDPClient
+from silkworm.exceptions import HttpError
 from silkworm.middlewares import (
     DelayMiddleware,
     RetryMiddleware,
@@ -654,6 +655,27 @@ def _build_cdp_client(blueprint: CrawlBlueprint) -> CDPClient:
     )
 
 
+def _format_cdp_fetch_error(url: str, exc: HttpError) -> str:
+    detail = str(exc).strip()
+    lowered = detail.lower()
+
+    if "cannot find default execution context" in lowered:
+        return (
+            f"CDP fetch failed for {url}: the browser page lost its execution context "
+            "before HTML could be captured. Retry the request; if it persists, restart the CDP browser."
+        )
+
+    if "timed out" in lowered or "timeout" in lowered:
+        return (
+            f"CDP fetch failed for {url}: the browser did not respond in time. "
+            "Retry or increase `timeout_seconds`."
+        )
+
+    if detail:
+        return f"CDP fetch failed for {url}: {_clip(detail, 240)}"
+    return f"CDP fetch failed for {url}."
+
+
 async def _fetch_html_via_cdp(
     *,
     url: str,
@@ -669,8 +691,11 @@ async def _fetch_html_via_cdp(
         timeout=timeout_seconds,
     )
     try:
-        await client.connect()
-        response = await client.fetch(Request(url=url, headers=dict(headers or {})))
+        try:
+            await client.connect()
+            response = await client.fetch(Request(url=url, headers=dict(headers or {})))
+        except HttpError as exc:
+            raise ToolError(_format_cdp_fetch_error(url, exc)) from None
         try:
             html = response.text
             stored_document: StoredDocument | None = None

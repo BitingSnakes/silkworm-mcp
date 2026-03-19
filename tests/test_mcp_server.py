@@ -372,6 +372,33 @@ def test_silkworm_fetch_formats_ssl_certificate_failures(
     assert "CERTIFICATE_VERIFY_FAILED" not in message
 
 
+def test_silkworm_fetch_cdp_formats_execution_context_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCDPClient:
+        async def connect(self) -> None:
+            return None
+
+        async def fetch(self, req: Request):  # noqa: ANN001
+            raise HttpError(
+                "CDP command Runtime.evaluate failed: CDP error: Cannot find default execution context"
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(mcp_helpers, "CDPClient", lambda **kwargs: FakeCDPClient())
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(mcp_tools.silkworm_fetch_cdp("https://example.com"))
+
+    assert str(exc_info.value) == (
+        "CDP fetch failed for https://example.com: "
+        "the browser page lost its execution context before HTML could be captured. "
+        "Retry the request; if it persists, restart the CDP browser."
+    )
+
+
 def test_fastmcp_tool_error_filter_suppresses_tracebacks() -> None:
     error = ToolError(
         "Fetch failed for https://tishreen.news.sy/: TLS certificate verification failed."
