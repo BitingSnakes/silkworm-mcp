@@ -429,7 +429,7 @@ async def silkworm_fetch(
     body_text: str | None = None,
     body_json: dict[str, Any] | list[Any] | None = None,
     emulation: str = "Firefox139",
-    timeout_seconds: float | None = 20.0,
+    timeout_seconds: float = 20.0,
     keep_alive: bool = False,
     store_document: bool = True,
     label: str | None = None,
