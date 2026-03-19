@@ -658,7 +658,7 @@ async def _fetch_html_via_cdp(
     *,
     url: str,
     ws_endpoint: str,
-    timeout_seconds: float | None,
+    timeout_seconds: float,
     headers: dict[str, str] | None = None,
     store_document: bool,
     label: str | None,

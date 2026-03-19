@@ -283,7 +283,7 @@ class CrawlBlueprint(BaseModel):
         default="ws://127.0.0.1:9222",
         description="CDP WebSocket endpoint used when transport='cdp'.",
     )
-    cdp_timeout_seconds: float | None = Field(
+    cdp_timeout_seconds: float = Field(
         default=None,
         ge=0.1,
         le=300,
@@ -355,7 +355,7 @@ class CrawlBlueprint(BaseModel):
         le=10_000,
         description="Optional Engine queue cap.",
     )
-    request_timeout_seconds: float | None = Field(
+    request_timeout_seconds: float = Field(
         default=20.0,
         ge=0.1,
         le=300,
