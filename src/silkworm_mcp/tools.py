@@ -4,8 +4,10 @@ import ast
 from typing import Any
 from urllib.parse import urljoin
 
+from fastmcp.exceptions import ToolError
 import scraper_rs
 from silkworm import HTMLResponse, Request
+from silkworm.exceptions import HttpError
 from silkworm.http import HttpClient
 
 from .constants import (
@@ -53,6 +55,43 @@ from .models import (
     _validate_ws_url,
 )
 from .runtime import DOCUMENT_STORE, SERVER_SETTINGS, mcp
+
+
+def _format_http_fetch_error(url: str, exc: HttpError) -> str:
+    detail = str(exc).strip()
+    prefix = f"Request to {url} failed:"
+    if detail.startswith(prefix):
+        detail = detail[len(prefix) :].strip()
+
+    lowered = detail.lower()
+    if (
+        "certificate_verify_failed" in lowered
+        or "certificate verify failed" in lowered
+        or "self signed certificate" in lowered
+    ):
+        return (
+            f"Fetch failed for {url}: TLS certificate verification failed. "
+            "The remote site's HTTPS certificate could not be verified by this runtime."
+        )
+
+    if "timed out" in lowered or "timeout" in lowered:
+        return (
+            f"Fetch failed for {url}: the request timed out. "
+            "Retry or increase `timeout_seconds`."
+        )
+
+    if "name or service not known" in lowered or "dns" in lowered:
+        return f"Fetch failed for {url}: DNS resolution failed for the target host."
+
+    if "connection refused" in lowered:
+        return f"Fetch failed for {url}: the remote host refused the connection."
+
+    if "connection reset" in lowered:
+        return f"Fetch failed for {url}: the connection was reset by the remote host."
+
+    if detail:
+        return f"Fetch failed for {url}: {_clip(detail, 240)}"
+    return f"Fetch failed for {url}."
 
 
 @mcp.tool(tags={"documents", "selectors"})
@@ -416,7 +455,10 @@ async def silkworm_fetch(
     )
 
     try:
-        response = await client.fetch(request)
+        try:
+            response = await client.fetch(request)
+        except HttpError as exc:
+            raise ToolError(_format_http_fetch_error(url, exc)) from None
         try:
             body_text_value = response.text
             is_html = isinstance(response, HTMLResponse)

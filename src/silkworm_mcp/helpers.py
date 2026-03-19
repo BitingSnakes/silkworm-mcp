@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 import scraper_rs
+from fastmcp.exceptions import ToolError
 from rnet import Emulation
 from silkworm import Request, Spider
 from silkworm.cdp import CDPClient
@@ -42,6 +43,22 @@ from .models import (
 )
 from .runtime import DOCUMENT_STORE, EMULATION_NAMES, SERVER_SETTINGS
 from .settings import _validate_url
+
+
+class _FastMCPToolErrorFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.exc_info:
+            return True
+
+        exc_type, exc_value, _traceback = record.exc_info
+        if not exc_type or not isinstance(exc_value, ToolError):
+            return True
+
+        record.msg = f"{record.getMessage()}: {exc_value}"
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
 
 
 def _validate_optional_query_pair(
@@ -86,16 +103,16 @@ def _resolve_document_input(
     html: str | None = None,
 ) -> tuple[str, StoredDocument | None]:
     if bool(document_handle) == bool(html):
-        raise ValueError("Provide exactly one of 'document_handle' or 'html'.")
+        raise ToolError("Provide exactly one of 'document_handle' or 'html'.")
     if document_handle is not None:
         try:
             document = DOCUMENT_STORE.get(document_handle)
         except ValueError as exc:
-            raise ValueError(
+            raise ToolError(
                 f"{exc} The handle is looked up in the server-side document cache. "
                 "If it came from an earlier server process or expired, fetch/store the HTML again "
                 "or pass inline 'html' to this tool."
-            ) from exc
+            ) from None
         return document.html, document
     assert html is not None
     return html, None
@@ -262,6 +279,12 @@ def _configure_logging(level_name: str) -> None:
         level=getattr(logging, level_name, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    fastmcp_logger = logging.getLogger("fastmcp.server.server")
+    if not any(
+        isinstance(existing_filter, _FastMCPToolErrorFilter)
+        for existing_filter in fastmcp_logger.filters
+    ):
+        fastmcp_logger.addFilter(_FastMCPToolErrorFilter())
 
 
 def _serialize_element(

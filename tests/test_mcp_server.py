@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import logging
 import sys
 import time
 import tomllib
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import ToolError
 from silkworm import HTMLResponse
+from silkworm.exceptions import HttpError
 from silkworm.request import Request
+from silkworm_mcp import helpers as mcp_helpers
+from silkworm_mcp import tools as mcp_tools
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -134,7 +139,7 @@ def test_document_store_persists_handles_across_store_instances(
 
 
 def test_query_selector_error_mentions_rehydrating_html() -> None:
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         query_selector(
             document_handle="missing-handle",
             query=".product .name",
@@ -328,6 +333,68 @@ def test_server_version_matches_pyproject() -> None:
 def test_silkworm_fetch_rejects_non_http_urls() -> None:
     with pytest.raises(ValueError, match="absolute URL"):
         asyncio.run(silkworm_fetch("file:///tmp/not-allowed.html"))
+
+
+def test_inspect_document_requires_exactly_one_input() -> None:
+    with pytest.raises(
+        ToolError, match="Provide exactly one of 'document_handle' or 'html'"
+    ):
+        mcp_tools.inspect_document()
+
+
+def test_inspect_document_unknown_handle_raises_tool_error() -> None:
+    with pytest.raises(ToolError, match="Unknown document handle"):
+        mcp_tools.inspect_document(document_handle="missing-handle")
+
+
+def test_silkworm_fetch_formats_ssl_certificate_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch(self, req: Request):  # noqa: ANN001
+        raise HttpError(
+            "Request to https://tishreen.news.sy/ failed: "
+            "is_connect error: wreq::Error { kind: Request, uri: https://tishreen.news.sy/, "
+            "source: Error { kind: Connect, source: Some(Error { code: SSL (1), cause: "
+            'Some(Ssl(ErrorStack([Error { reason: "CERTIFICATE_VERIFY_FAILED" }]))) }) } }'
+        )
+
+    monkeypatch.setattr(mcp_tools.HttpClient, "fetch", fake_fetch)
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(silkworm_fetch("https://tishreen.news.sy/"))
+
+    message = str(exc_info.value)
+    assert message == (
+        "Fetch failed for https://tishreen.news.sy/: "
+        "TLS certificate verification failed. "
+        "The remote site's HTTPS certificate could not be verified by this runtime."
+    )
+    assert "CERTIFICATE_VERIFY_FAILED" not in message
+
+
+def test_fastmcp_tool_error_filter_suppresses_tracebacks() -> None:
+    error = ToolError(
+        "Fetch failed for https://tishreen.news.sy/: TLS certificate verification failed."
+    )
+    record = logging.LogRecord(
+        "fastmcp.server.server",
+        logging.ERROR,
+        __file__,
+        1,
+        "Error calling tool %r",
+        ("silkworm_fetch",),
+        (ToolError, error, None),
+    )
+
+    allowed = mcp_helpers._FastMCPToolErrorFilter().filter(record)
+
+    assert allowed is True
+    assert record.getMessage() == (
+        "Error calling tool 'silkworm_fetch': "
+        "Fetch failed for https://tishreen.news.sy/: TLS certificate verification failed."
+    )
+    assert record.exc_info is None
+    assert record.exc_text is None
 
 
 def test_generate_spider_template_closes_cdp_client() -> None:
