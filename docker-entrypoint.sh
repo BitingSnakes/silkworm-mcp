@@ -17,7 +17,7 @@ is_truthy() {
 : "${MCP_PORT:=8000}"
 : "${MCP_PATH:=}"
 : "${LIGHTPANDA_ENABLED:=1}"
-: "${LIGHTPANDA_HOST:=127.0.0.1}"
+: "${LIGHTPANDA_HOST:=0.0.0.0}"
 : "${LIGHTPANDA_PORT:=9222}"
 : "${LIGHTPANDA_LOG_FORMAT:=pretty}"
 : "${LIGHTPANDA_LOG_LEVEL:=info}"
