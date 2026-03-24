@@ -12,7 +12,7 @@ dependencies = [
     "fastmcp>=3.1.1",
     "pydantic>=2.12.5",
     "scraper-rust>=0.4.3",
-    "silkworm-rs>=0.4.0",
+    "silkworm-rs>=0.4.4",
 ]
 
 [project.scripts]

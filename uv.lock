@@ -1049,7 +1049,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.1.1" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "scraper-rust", specifier = ">=0.4.3" },
-    { name = "silkworm-rs", specifier = ">=0.4.0" },
+    { name = "silkworm-rs", specifier = ">=0.4.4" },
 ]
 
 [package.metadata.requires-dev]
@@ -1060,7 +1060,7 @@ dev = [
 
 [[package]]
 name = "silkworm-rs"
-version = "0.4.3"
+version = "0.4.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "charset-normalizer" },
@@ -1069,9 +1069,9 @@ dependencies = [
     { name = "rxml" },
     { name = "scraper-rust" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d3/58/7e67c2a796994d44a65431221e5891e9001f27188679c3313ed4bad691e6/silkworm_rs-0.4.3.tar.gz", hash = "sha256:05c447ffde7f01556557e0e7ba64888df44dab0c90d8fd7db7501eaeb878579b", size = 274873, upload-time = "2026-03-23T03:04:36.998Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/46/ab2b610e308b98feadcc57d833b77e15ca845cf6bac6b1514d038a52a8ca/silkworm_rs-0.4.4.tar.gz", hash = "sha256:bed016138b9a743d39910c81909569e1ccca0b2322d434345b7a9c03f306e36a", size = 274672, upload-time = "2026-03-24T17:52:19.604Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/ec/0cca3f8e1dc15b93c110ffa3e2ac825d82ed8aabd9fd5672962d50226af4/silkworm_rs-0.4.3-py3-none-any.whl", hash = "sha256:4807dc53d12276e2e3efb9c0c91a7293297405be0ac527d7164416febbd92676", size = 61593, upload-time = "2026-03-23T03:04:35.485Z" },
+    { url = "https://files.pythonhosted.org/packages/88/bb/0fb1f4c5f1aa54348d676973a413ded9729dc5cd124e099d606df9f56a39/silkworm_rs-0.4.4-py3-none-any.whl", hash = "sha256:29cac6e7ceb12a221a4b829a9f905c40c89a0bd15ef6ae1780a99aca3926c360", size = 61593, upload-time = "2026-03-24T17:52:17.862Z" },
 ]
 
 [[package]]
