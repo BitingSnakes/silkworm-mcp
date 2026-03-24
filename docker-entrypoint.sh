@@ -20,6 +20,7 @@ is_truthy() {
 : "${LIGHTPANDA_HOST:=0.0.0.0}"
 : "${LIGHTPANDA_PORT:=9222}"
 : "${LIGHTPANDA_ADVERTISE_HOST:=}"
+: "${LIGHTPANDA_TIMEOUT:=120}"
 : "${LIGHTPANDA_LOG_FORMAT:=pretty}"
 : "${LIGHTPANDA_LOG_LEVEL:=info}"
 
@@ -58,7 +59,7 @@ if ! is_truthy "$LIGHTPANDA_ENABLED"; then
   exec "$@"
 fi
 
-lightpanda_cmd="lightpanda serve --log_format \"$LIGHTPANDA_LOG_FORMAT\" --log_level \"$LIGHTPANDA_LOG_LEVEL\" --host \"$LIGHTPANDA_HOST\" --port \"$LIGHTPANDA_PORT\""
+lightpanda_cmd="lightpanda serve --log_format \"$LIGHTPANDA_LOG_FORMAT\" --log_level \"$LIGHTPANDA_LOG_LEVEL\" --host \"$LIGHTPANDA_HOST\" --port \"$LIGHTPANDA_PORT\" --timeout \"$LIGHTPANDA_TIMEOUT\""
 if [ -n "$LIGHTPANDA_ADVERTISE_HOST" ]; then
   lightpanda_cmd="$lightpanda_cmd --advertise_host \"$LIGHTPANDA_ADVERTISE_HOST\""
 fi
