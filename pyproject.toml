@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silkworm-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "An MCP server for https://github.com/BitingSnakes/silkworm"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastmcp>=3.1.1",
     "pydantic>=2.12.5",
-    "scraper-rust>=0.4.1",
+    "scraper-rust>=0.4.2",
     "silkworm-rs>=0.4.0",
 ]
 
