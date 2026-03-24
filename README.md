@@ -103,8 +103,11 @@ Useful container environment variables:
 - `LIGHTPANDA_ENABLED` (default: `1`)
 - `LIGHTPANDA_HOST` (default: `127.0.0.1`)
 - `LIGHTPANDA_PORT` (default: `9222`)
+- `LIGHTPANDA_ADVERTISE_HOST` (default: unset, falls back to `LIGHTPANDA_HOST`)
 - `LIGHTPANDA_LOG_FORMAT` (default: `pretty`)
 - `LIGHTPANDA_LOG_LEVEL` (default: `info`)
+
+When Lightpanda binds to `0.0.0.0` inside a container, set `LIGHTPANDA_ADVERTISE_HOST` to a reachable hostname such as the container DNS name. Otherwise `/json/version` can advertise `ws://0.0.0.0:9222/`, which remote CDP clients cannot use.
 
 Example with custom document-cache limits:
 
