@@ -1,5 +1,3 @@
-FROM docker.io/library/rust:1.94-slim AS rust
-
 FROM docker.io/library/python:3.14-slim
 
 ARG TARGETARCH
@@ -8,24 +6,19 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    CARGO_HOME=/usr/local/cargo \
-    RUSTUP_HOME=/usr/local/rustup \
     SILKWORM_MCP_DOCUMENT_MAX_COUNT=128 \
     SILKWORM_MCP_DOCUMENT_MAX_TOTAL_BYTES=32000000 \
     SILKWORM_MCP_DOCUMENT_TTL_SECONDS=3600 \
     SILKWORM_MCP_READINESS_REQUIRE_CDP=true \
     PATH="/app/.venv/bin:${PATH}"
 
-COPY --from=rust /usr/local/cargo /usr/local/cargo
-COPY --from=rust /usr/local/rustup /usr/local/rustup
-
 WORKDIR /app
 
-RUN apt-get update && \
-    apt-get install --yes --no-install-recommends build-essential ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
+RUN pip install --upgrade pip && pip install --no-cache-dir "uv==0.11.*"
 
-RUN pip install --no-cache-dir "uv==0.11.*"
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system app && \
     useradd --system --gid app --create-home --home-dir /app app
