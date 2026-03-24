@@ -2,6 +2,8 @@ FROM rust:1.94-slim AS rust
 
 FROM python:3.14-slim
 
+ARG TARGETARCH
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -28,7 +30,12 @@ RUN pip install --no-cache-dir "uv==0.11.*"
 RUN groupadd --system app && \
     useradd --system --gid app --create-home --home-dir /app app
 
-RUN curl -L -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && \
+RUN case "${TARGETARCH}" in \
+      amd64) lightpanda_arch='x86_64' ;; \
+      arm64) lightpanda_arch='aarch64' ;; \
+      *) echo "Unsupported TARGETARCH for Lightpanda: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    curl -L -o /usr/local/bin/lightpanda "https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-${lightpanda_arch}-linux" && \
     chmod 0755 /usr/local/bin/lightpanda
 
 COPY pyproject.toml uv.lock README.md ./
