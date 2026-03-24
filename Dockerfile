@@ -1,6 +1,6 @@
-FROM rust:1.94-slim AS rust
+FROM docker.io/library/rust:1.94-slim AS rust
 
-FROM python:3.14-slim
+FROM docker.io/library/python:3.14-slim
 
 ARG TARGETARCH
 
