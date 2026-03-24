@@ -686,3 +686,42 @@ def test_generate_spider_template_infers_list_only_variant() -> None:
     ast.parse(template.code)
     assert "async def _build_pagination_requests" in template.code
     assert "async def parse_detail" not in template.code
+
+
+def test_crawl_blueprint_coerces_delay_strings_to_floats() -> None:
+    fixed_delay_blueprint = CrawlBlueprint.model_validate(
+        {
+            "spider_name": "catalog_spider",
+            "start_urls": ["https://example.com/catalog"],
+            "item_selector": ".product",
+            "fields": [{"name": "name", "css": ".name"}],
+            "delay_seconds": "1.0",
+        }
+    )
+    randomized_delay_blueprint = CrawlBlueprint.model_validate(
+        {
+            "spider_name": "catalog_spider_randomized",
+            "start_urls": ["https://example.com/catalog"],
+            "item_selector": ".product",
+            "fields": [{"name": "name", "css": ".name"}],
+            "delay_min_seconds": "0.5",
+            "delay_max_seconds": "1.5",
+        }
+    )
+
+    assert fixed_delay_blueprint.delay_seconds == 1.0
+    assert randomized_delay_blueprint.delay_min_seconds == 0.5
+    assert randomized_delay_blueprint.delay_max_seconds == 1.5
+
+
+def test_crawl_blueprint_schema_accepts_string_delay_values() -> None:
+    schema = CrawlBlueprint.model_json_schema()
+    delay_seconds_schema = schema["properties"]["delay_seconds"]
+    accepted_types = set()
+    for entry in delay_seconds_schema["anyOf"]:
+        if "type" in entry:
+            accepted_types.add(entry["type"])
+        for nested_entry in entry.get("anyOf", []):
+            accepted_types.add(nested_entry["type"])
+
+    assert accepted_types == {"number", "string", "null"}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import (
     DEFAULT_HTML_MAX_SIZE_BYTES,
@@ -361,19 +361,19 @@ class CrawlBlueprint(BaseModel):
         le=300,
         description="Per-request timeout in seconds.",
     )
-    delay_seconds: float | None = Field(
+    delay_seconds: float | str | None = Field(
         default=None,
         ge=0.0,
         le=300,
         description="Fixed delay inserted before requests.",
     )
-    delay_min_seconds: float | None = Field(
+    delay_min_seconds: float | str | None = Field(
         default=None,
         ge=0.0,
         le=300,
         description="Minimum randomized request delay.",
     )
-    delay_max_seconds: float | None = Field(
+    delay_max_seconds: float | str | None = Field(
         default=None,
         ge=0.0,
         le=300,
@@ -431,6 +431,24 @@ class CrawlBlueprint(BaseModel):
         default=True,
         description="Generate templates with run_spider_uvloop instead of run_spider.",
     )
+
+    @field_validator(
+        "delay_seconds",
+        "delay_min_seconds",
+        "delay_max_seconds",
+        mode="before",
+    )
+    @classmethod
+    def coerce_delay_string(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return value
+        try:
+            return float(stripped)
+        except ValueError:
+            return value
 
     @model_validator(mode="after")
     def validate_blueprint(self) -> "CrawlBlueprint":
