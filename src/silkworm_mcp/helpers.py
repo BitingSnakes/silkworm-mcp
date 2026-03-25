@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import re
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urljoin
@@ -37,6 +38,7 @@ from .models import (
     DocumentSummary,
     FetchResult,
     HtmlParseNode,
+    InverseSelectorMatch,
     SelectorMatch,
     ServerConfigurationSummary,
     ServerHealthReport,
@@ -80,6 +82,10 @@ def _clip(value: str | None, limit: int) -> str:
     return f"{text[:limit].rstrip()}..."
 
 
+def _collapse_whitespace(value: str | None) -> str:
+    return _WHITESPACE_RE.sub(" ", value or "").strip()
+
+
 def _normalize_identifier(name: str, default: str = "GeneratedSpider") -> str:
     candidate = re.sub(r"[^0-9a-zA-Z_]", "_", name).strip("_") or default
     if candidate[0].isdigit():
@@ -88,6 +94,21 @@ def _normalize_identifier(name: str, default: str = "GeneratedSpider") -> str:
 
 
 _LEADING_DOCTYPE_RE = re.compile(r"^\s*<!DOCTYPE[^>]*>\s*", re.IGNORECASE)
+_HTML_DOCUMENT_RE = re.compile(r"^\s*(<!DOCTYPE|<html\b)", re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"\s+")
+_SIMPLE_CSS_IDENTIFIER_RE = re.compile(r"^-?[_a-zA-Z][-_a-zA-Z0-9]*$")
+
+
+@dataclass(slots=True)
+class _InverseSelectorNode:
+    tag: str
+    attrs: dict[str, str]
+    parent: _InverseSelectorNode | None
+    children: list[_InverseSelectorNode] = dataclass_field(default_factory=list)
+    text_content: str = ""
+    same_tag_index: int = 1
+    same_tag_total: int = 1
+    order: int = 0
 
 
 def _strip_leading_doctype(html: str) -> str:
@@ -347,6 +368,291 @@ def _query_document_first(
             return fallback_document.xpath_first(query)
         finally:
             fallback_document.close()
+
+
+def _html_looks_like_document(html: str) -> bool:
+    return bool(_HTML_DOCUMENT_RE.match(html))
+
+
+def _normalize_text_query(value: str, *, case_sensitive: bool) -> str:
+    collapsed = _collapse_whitespace(value)
+    return collapsed if case_sensitive else collapsed.casefold()
+
+
+def _build_inverse_selector_nodes(
+    html: str,
+    *,
+    max_size_bytes: int | None,
+    truncate_on_limit: bool,
+) -> list[_InverseSelectorNode]:
+    root = _parse_html_tree(
+        html,
+        parse_mode="document",
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+    elements: list[_InverseSelectorNode] = []
+    roots: list[_InverseSelectorNode] = []
+
+    def visit(
+        node: HtmlParseNode,
+        parent: _InverseSelectorNode | None,
+    ) -> str:
+        if node.node_type == "text":
+            return node.text or ""
+
+        if node.node_type == "element" and node.tag:
+            element = _InverseSelectorNode(
+                tag=node.tag,
+                attrs=dict(node.attrs or {}),
+                parent=parent,
+                order=len(elements),
+            )
+            elements.append(element)
+            if parent is None:
+                roots.append(element)
+            else:
+                parent.children.append(element)
+
+            text_parts: list[str] = []
+            for child in node.children:
+                child_text = visit(child, element)
+                if child_text:
+                    text_parts.append(child_text)
+            element.text_content = _collapse_whitespace(" ".join(text_parts))
+            return element.text_content
+
+        text_parts: list[str] = []
+        for child in node.children:
+            child_text = visit(child, parent)
+            if child_text:
+                text_parts.append(child_text)
+        return _collapse_whitespace(" ".join(text_parts))
+
+    visit(root, None)
+
+    def assign_same_tag_positions(children: list[_InverseSelectorNode]) -> None:
+        totals: dict[str, int] = {}
+        for child in children:
+            totals[child.tag] = totals.get(child.tag, 0) + 1
+
+        seen: dict[str, int] = {}
+        for child in children:
+            seen[child.tag] = seen.get(child.tag, 0) + 1
+            child.same_tag_index = seen[child.tag]
+            child.same_tag_total = totals[child.tag]
+            assign_same_tag_positions(child.children)
+
+    assign_same_tag_positions(roots)
+    return elements
+
+
+def _node_matches_text(
+    node: _InverseSelectorNode,
+    *,
+    normalized_query: str,
+    match_type: Literal["exact", "contains"],
+    case_sensitive: bool,
+) -> bool:
+    normalized_text = _normalize_text_query(
+        node.text_content,
+        case_sensitive=case_sensitive,
+    )
+    if not normalized_text:
+        return False
+    if match_type == "exact":
+        return normalized_text == normalized_query
+    return normalized_query in normalized_text
+
+
+def _has_matching_descendant(
+    node: _InverseSelectorNode,
+    *,
+    matched_orders: set[int],
+) -> bool:
+    for child in node.children:
+        if child.order in matched_orders or _has_matching_descendant(
+            child,
+            matched_orders=matched_orders,
+        ):
+            return True
+    return False
+
+
+def _node_chain(
+    node: _InverseSelectorNode,
+    *,
+    strip_document_wrappers: bool,
+) -> list[_InverseSelectorNode]:
+    chain: list[_InverseSelectorNode] = []
+    current: _InverseSelectorNode | None = node
+    while current is not None:
+        chain.append(current)
+        current = current.parent
+    chain.reverse()
+
+    if (
+        strip_document_wrappers
+        and len(chain) >= 2
+        and chain[0].tag == "html"
+        and chain[1].tag == "body"
+    ):
+        trimmed = chain[2:]
+        if trimmed:
+            return trimmed
+    return chain
+
+
+def _css_escape_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _xpath_literal(value: str) -> str:
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    parts = value.split("'")
+    rendered_parts: list[str] = []
+    for index, part in enumerate(parts):
+        if part:
+            rendered_parts.append(f"'{part}'")
+        if index != len(parts) - 1:
+            rendered_parts.append('"\'"')
+    return f"concat({', '.join(rendered_parts)})"
+
+
+def _build_css_segment(
+    node: _InverseSelectorNode,
+    *,
+    id_counts: dict[str, int],
+) -> tuple[str, bool]:
+    id_value = node.attrs.get("id")
+    if id_value:
+        if _SIMPLE_CSS_IDENTIFIER_RE.match(id_value):
+            return f"{node.tag}#{id_value}", id_counts.get(id_value, 0) == 1
+        return (
+            f'{node.tag}[id="{_css_escape_string(id_value)}"]',
+            id_counts.get(id_value, 0) == 1,
+        )
+
+    classes = [
+        item
+        for item in node.attrs.get("class", "").split()
+        if _SIMPLE_CSS_IDENTIFIER_RE.match(item)
+    ]
+    segment = node.tag
+    if classes:
+        segment += "".join(f".{item}" for item in classes)
+    if node.same_tag_total > 1:
+        segment += f":nth-of-type({node.same_tag_index})"
+    return segment, False
+
+
+def _build_inverse_css_selector(
+    node: _InverseSelectorNode,
+    *,
+    id_counts: dict[str, int],
+    strip_document_wrappers: bool,
+) -> str:
+    chain = _node_chain(node, strip_document_wrappers=strip_document_wrappers)
+    start_index = 0
+    for index, current in enumerate(chain):
+        id_value = current.attrs.get("id")
+        if id_value and id_counts.get(id_value, 0) == 1:
+            start_index = index
+
+    segments = [
+        _build_css_segment(current, id_counts=id_counts)[0]
+        for current in chain[start_index:]
+    ]
+    return " > ".join(segments)
+
+
+def _build_inverse_xpath_selector(
+    node: _InverseSelectorNode,
+    *,
+    id_counts: dict[str, int],
+    strip_document_wrappers: bool,
+) -> str:
+    chain = _node_chain(node, strip_document_wrappers=strip_document_wrappers)
+    for index, current in enumerate(chain):
+        id_value = current.attrs.get("id")
+        if id_value and id_counts.get(id_value, 0) == 1:
+            suffix = "".join(
+                f"/{child.tag}[{child.same_tag_index}]" for child in chain[index + 1 :]
+            )
+            return f"//*[@id={_xpath_literal(id_value)}]{suffix}"
+    return "//" + "/".join(
+        f"{current.tag}[{current.same_tag_index}]" for current in chain
+    )
+
+
+def _find_inverse_selector_matches(
+    html: str,
+    *,
+    text_query: str,
+    match_type: Literal["exact", "contains"],
+    case_sensitive: bool,
+    text_chars: int,
+    max_size_bytes: int | None,
+    truncate_on_limit: bool,
+) -> list[InverseSelectorMatch]:
+    normalized_query = _normalize_text_query(
+        text_query,
+        case_sensitive=case_sensitive,
+    )
+    if not normalized_query:
+        raise ValueError("'text_query' must contain non-whitespace text.")
+
+    nodes = _build_inverse_selector_nodes(
+        html,
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+    matching_nodes = [
+        node
+        for node in nodes
+        if _node_matches_text(
+            node,
+            normalized_query=normalized_query,
+            match_type=match_type,
+            case_sensitive=case_sensitive,
+        )
+    ]
+    matched_orders = {node.order for node in matching_nodes}
+    specific_matches = [
+        node
+        for node in matching_nodes
+        if not _has_matching_descendant(node, matched_orders=matched_orders)
+    ]
+
+    id_counts: dict[str, int] = {}
+    for node in nodes:
+        id_value = node.attrs.get("id")
+        if id_value:
+            id_counts[id_value] = id_counts.get(id_value, 0) + 1
+
+    strip_document_wrappers = not _html_looks_like_document(html)
+    return [
+        InverseSelectorMatch(
+            index=index,
+            tag=node.tag,
+            text=_clip(node.text_content, text_chars),
+            css=_build_inverse_css_selector(
+                node,
+                id_counts=id_counts,
+                strip_document_wrappers=strip_document_wrappers,
+            ),
+            xpath=_build_inverse_xpath_selector(
+                node,
+                id_counts=id_counts,
+                strip_document_wrappers=strip_document_wrappers,
+            ),
+            attrs=dict(node.attrs),
+        )
+        for index, node in enumerate(specific_matches)
+    ]
 
 
 async def _query_scope(scope: Any, *, query: str, mode: SelectorMode) -> list[Any]:

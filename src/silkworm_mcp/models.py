@@ -128,6 +128,27 @@ class SelectorComparisonResult(BaseModel):
     comparisons: list[SelectorComparisonEntry] = Field(default_factory=list)
 
 
+class InverseSelectorMatch(BaseModel):
+    index: int
+    tag: str
+    text: str
+    css: str
+    xpath: str
+    attrs: dict[str, str] = Field(default_factory=dict)
+
+
+class InverseSelectorResult(BaseModel):
+    document_handle: str | None = None
+    source_url: str | None = None
+    text_query: str
+    match_type: Literal["exact", "contains"]
+    case_sensitive: bool
+    total_matches: int
+    returned_matches: int
+    omitted_matches: int
+    matches: list[InverseSelectorMatch] = Field(default_factory=list)
+
+
 class LinkMatch(BaseModel):
     index: int
     text: str

@@ -26,6 +26,7 @@ from mcp_server import (
     SelectorMode,
     SpiderTemplateVariant,
     clear_documents,
+    find_selectors_by_text,
     generate_spider_template,
     list_documents,
     parse_html_document,
@@ -104,6 +105,66 @@ def test_query_selector_still_returns_expected_matches() -> None:
 
     assert result.total_matches == 2
     assert result.matches[0].text == "Widget A"
+
+
+def test_find_selectors_by_text_round_trips_css_and_xpath() -> None:
+    summary = store_html_document(
+        html=SAMPLE_HTML,
+        source_url="https://example.com/catalog",
+    )
+
+    inverse = find_selectors_by_text(
+        document_handle=summary.handle,
+        text_query="Widget A",
+    )
+
+    assert inverse.total_matches == 1
+    assert inverse.matches[0].tag == "h2"
+    assert inverse.matches[0].text == "Widget A"
+
+    css_result = query_selector(
+        document_handle=summary.handle,
+        query=inverse.matches[0].css,
+        mode=SelectorMode.css,
+    )
+    xpath_result = query_selector(
+        document_handle=summary.handle,
+        query=inverse.matches[0].xpath,
+        mode=SelectorMode.xpath,
+    )
+
+    assert css_result.total_matches == 1
+    assert css_result.matches[0].text == "Widget A"
+    assert xpath_result.total_matches == 1
+    assert xpath_result.matches[0].text == "Widget A"
+
+
+def test_find_selectors_by_text_handles_fragments_with_unique_ids() -> None:
+    fragment_html = '<div><span id="target">Fragment</span></div>'
+
+    inverse = find_selectors_by_text(
+        html=fragment_html,
+        text_query="fragment",
+        case_sensitive=False,
+    )
+
+    assert inverse.total_matches == 1
+    assert inverse.matches[0].css == "span#target"
+    assert inverse.matches[0].xpath == "//*[@id='target']"
+
+    css_result = query_selector(
+        html=fragment_html,
+        query=inverse.matches[0].css,
+        mode=SelectorMode.css,
+    )
+    xpath_result = query_selector(
+        html=fragment_html,
+        query=inverse.matches[0].xpath,
+        mode=SelectorMode.xpath,
+    )
+
+    assert css_result.total_matches == 1
+    assert xpath_result.total_matches == 1
 
 
 def test_document_store_persists_handles_across_store_instances(

@@ -30,6 +30,7 @@ EXPECTED_TOOL_NAMES = {
     "parse_html_fragment",
     "query_selector",
     "compare_selectors",
+    "find_selectors_by_text",
     "extract_links",
     "silkworm_fetch",
     "silkworm_fetch_cdp",
@@ -357,6 +358,18 @@ def test_stdio_transport_covers_every_tool(tmp_path: Path) -> None:
                 )
                 assert queried.structured_content["total_matches"] == 2
                 assert queried.structured_content["matches"][0]["text"] == "Widget A"
+
+                inverse = await client.call_tool(
+                    "find_selectors_by_text",
+                    {
+                        "document_handle": stored_handle,
+                        "text_query": "Widget A",
+                    },
+                )
+                assert inverse.structured_content["total_matches"] == 1
+                assert inverse.structured_content["matches"][0]["tag"] == "h2"
+                assert inverse.structured_content["matches"][0]["css"]
+                assert inverse.structured_content["matches"][0]["xpath"]
 
                 compared = await client.call_tool(
                     "compare_selectors",

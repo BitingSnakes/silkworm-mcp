@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urljoin
 
 from fastmcp.exceptions import ToolError
@@ -23,6 +23,7 @@ from .helpers import (
     _document_base_url,
     _extract_static_item,
     _fetch_html_via_cdp,
+    _find_inverse_selector_matches,
     _normalize_emulation,
     _parse_html_tree,
     _query_document,
@@ -39,6 +40,7 @@ from .models import (
     DocumentSummary,
     FetchResult,
     HtmlParseResult,
+    InverseSelectorResult,
     LinkExtractionResult,
     LinkMatch,
     LivePageExtractionResult,
@@ -365,6 +367,47 @@ def compare_selectors(
         )
     finally:
         document.close()
+
+
+@mcp.tool(tags={"selectors"})
+def find_selectors_by_text(
+    text_query: str,
+    document_handle: str | None = None,
+    html: str | None = None,
+    match_type: Literal["exact", "contains"] = "exact",
+    case_sensitive: bool = False,
+    limit: int = 20,
+    text_chars: int = 300,
+    source_url: str | None = None,
+    max_size_bytes: int | None = DEFAULT_HTML_MAX_SIZE_BYTES,
+    truncate_on_limit: bool = False,
+) -> InverseSelectorResult:
+    """Find CSS/XPath selector candidates for the smallest matching elements by text."""
+    resolved_html, stored_document = _resolve_document_input(
+        document_handle=document_handle,
+        html=html,
+    )
+    matches = _find_inverse_selector_matches(
+        resolved_html,
+        text_query=text_query,
+        match_type=match_type,
+        case_sensitive=case_sensitive,
+        text_chars=text_chars,
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+    limited_matches = matches[:limit]
+    return InverseSelectorResult(
+        document_handle=stored_document.handle if stored_document else None,
+        source_url=_document_base_url(stored_document, source_url),
+        text_query=text_query,
+        match_type=match_type,
+        case_sensitive=case_sensitive,
+        total_matches=len(matches),
+        returned_matches=len(limited_matches),
+        omitted_matches=max(0, len(matches) - len(limited_matches)),
+        matches=limited_matches,
+    )
 
 
 @mcp.tool(tags={"selectors", "links"})
