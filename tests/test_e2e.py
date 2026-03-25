@@ -24,6 +24,7 @@ EXPECTED_TOOL_NAMES = {
     "delete_document",
     "clear_documents",
     "server_status",
+    "generate_regex",
     "inspect_document",
     "prettify_document",
     "parse_html_document",
@@ -358,6 +359,17 @@ def test_stdio_transport_covers_every_tool(tmp_path: Path) -> None:
                 )
                 assert queried.structured_content["total_matches"] == 2
                 assert queried.structured_content["matches"][0]["text"] == "Widget A"
+
+                regex = await client.call_tool(
+                    "generate_regex",
+                    {
+                        "test_cases": ["big", "BIGGER"],
+                        "case_insensitive": True,
+                        "capturing_groups": True,
+                    },
+                )
+                assert regex.structured_content["pattern"] == "(?i)^big(ger)?$"
+                assert regex.structured_content["anchors_enabled"] is True
 
                 inverse = await client.call_tool(
                     "find_selectors_by_text",

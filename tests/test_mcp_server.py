@@ -27,6 +27,7 @@ from mcp_server import (
     SpiderTemplateVariant,
     clear_documents,
     find_selectors_by_text,
+    generate_regex,
     generate_spider_template,
     list_documents,
     parse_html_document,
@@ -105,6 +106,18 @@ def test_query_selector_still_returns_expected_matches() -> None:
 
     assert result.total_matches == 2
     assert result.matches[0].text == "Widget A"
+
+
+def test_generate_regex_supports_core_grex_options() -> None:
+    result = generate_regex(
+        test_cases=["aa", "bcbc", "defdefdef"],
+        convert_repetitions=True,
+        minimum_substring_length=2,
+    )
+
+    assert result.pattern == "^(?:aa|(?:bc){2}|(?:def){3})$"
+    assert result.convert_repetitions is True
+    assert result.minimum_substring_length == 2
 
 
 def test_find_selectors_by_text_round_trips_css_and_xpath() -> None:

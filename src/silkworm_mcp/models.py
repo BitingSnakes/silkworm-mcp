@@ -554,6 +554,22 @@ class SpiderCodeValidationResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class GrexRegexResult(BaseModel):
+    test_cases: list[str] = Field(default_factory=list)
+    pattern: str
+    convert_digits: bool = False
+    convert_words: bool = False
+    convert_repetitions: bool = False
+    minimum_substring_length: int | None = None
+    minimum_repetitions: int | None = None
+    escape_non_ascii: bool = False
+    use_surrogate_pairs: bool = False
+    case_insensitive: bool = False
+    capturing_groups: bool = False
+    verbose_mode: bool = False
+    anchors_enabled: bool = True
+
+
 def _validate_optional_query_pair(
     css: str | None,
     xpath: str | None,

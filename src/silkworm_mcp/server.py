@@ -35,6 +35,7 @@ from . import tools as _tools
 
 clear_documents = _tools.clear_documents
 find_selectors_by_text = _tools.find_selectors_by_text
+generate_regex = _tools.generate_regex
 list_documents = _tools.list_documents
 parse_html_document = _tools.parse_html_document
 parse_html_fragment = _tools.parse_html_fragment
@@ -66,6 +67,7 @@ __all__ = [
     "_build_cdp_client",
     "clear_documents",
     "find_selectors_by_text",
+    "generate_regex",
     "generate_spider_template",
     "list_documents",
     "main",

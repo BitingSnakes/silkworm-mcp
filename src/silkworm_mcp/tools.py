@@ -5,6 +5,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 from fastmcp.exceptions import ToolError
+from grex import RegExpBuilder
 import scraper_rs
 from silkworm import HTMLResponse, Request
 from silkworm.exceptions import HttpError
@@ -39,6 +40,7 @@ from .models import (
     DeleteDocumentResult,
     DocumentSummary,
     FetchResult,
+    GrexRegexResult,
     HtmlParseResult,
     InverseSelectorResult,
     LinkExtractionResult,
@@ -152,6 +154,74 @@ async def server_status(
         probe_cdp=SERVER_SETTINGS.readiness_require_cdp or probe_cdp,
     )
     return _build_server_status(include_documents=include_documents, health=health)
+
+
+@mcp.tool(tags={"regex", "code"})
+def generate_regex(
+    test_cases: list[str],
+    convert_digits: bool = False,
+    convert_words: bool = False,
+    convert_repetitions: bool = False,
+    minimum_substring_length: int | None = None,
+    minimum_repetitions: int | None = None,
+    escape_non_ascii: bool = False,
+    use_surrogate_pairs: bool = False,
+    case_insensitive: bool = False,
+    capturing_groups: bool = False,
+    verbose_mode: bool = False,
+    anchors_enabled: bool = True,
+) -> GrexRegexResult:
+    """Generate a regular expression from sample strings using grex."""
+    if not test_cases:
+        raise ToolError("Provide at least one test case.")
+    if minimum_substring_length is not None and minimum_substring_length < 1:
+        raise ToolError("minimum_substring_length must be >= 1.")
+    if minimum_repetitions is not None and minimum_repetitions < 1:
+        raise ToolError("minimum_repetitions must be >= 1.")
+
+    try:
+        builder = RegExpBuilder.from_test_cases(test_cases)
+        if convert_digits:
+            builder = builder.with_conversion_of_digits()
+        if convert_words:
+            builder = builder.with_conversion_of_words()
+        if convert_repetitions:
+            builder = builder.with_conversion_of_repetitions()
+        if minimum_substring_length is not None:
+            builder = builder.with_minimum_substring_length(minimum_substring_length)
+        if minimum_repetitions is not None:
+            builder = builder.with_minimum_repetitions(minimum_repetitions)
+        if escape_non_ascii:
+            builder = builder.with_escaping_of_non_ascii_chars(
+                use_surrogate_pairs=use_surrogate_pairs
+            )
+        if case_insensitive:
+            builder = builder.with_case_insensitive_matching()
+        if capturing_groups:
+            builder = builder.with_capturing_groups()
+        if verbose_mode:
+            builder = builder.with_verbose_mode()
+        if not anchors_enabled:
+            builder = builder.without_anchors()
+        pattern = builder.build()
+    except Exception as exc:
+        raise ToolError(f"Failed to generate regex with grex: {exc}") from None
+
+    return GrexRegexResult(
+        test_cases=test_cases,
+        pattern=pattern,
+        convert_digits=convert_digits,
+        convert_words=convert_words,
+        convert_repetitions=convert_repetitions,
+        minimum_substring_length=minimum_substring_length,
+        minimum_repetitions=minimum_repetitions,
+        escape_non_ascii=escape_non_ascii,
+        use_surrogate_pairs=use_surrogate_pairs,
+        case_insensitive=case_insensitive,
+        capturing_groups=capturing_groups,
+        verbose_mode=verbose_mode,
+        anchors_enabled=anchors_enabled,
+    )
 
 
 @mcp.tool(tags={"inspect", "selectors"})

@@ -315,6 +315,21 @@ wheels = [
 ]
 
 [[package]]
+name = "grex"
+version = "1.0.2"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/fe/571fc3f8189267d7377b79da9581e010de9db7f72f91f586963ad411f447/grex-1.0.2-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:47ce10641329b59670e95535f233317dccfbb51267e3d632bd7324012d0a96a5", size = 1063005, upload-time = "2025-11-14T12:27:30.867Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/2c/bc433860f82d7403593eac4057525889a4128981776c0a9c8bf846819ea4/grex-1.0.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:9ea809fd2534369b4cc7d41b67b474af05d8fda8277f31258e6864d1e8385c87", size = 1006940, upload-time = "2025-11-14T12:27:32.331Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/1f/78340b899e0fb142377fbcfccea590dca091ae1e855da6b84012739e4230/grex-1.0.2-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9eb091b96913485a55498f6a15ca13694ec9d9479143b5f973c044cb8a40e092", size = 1137254, upload-time = "2025-11-14T12:27:33.852Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/b0/ffeae07ee466fdb17888ff7f181693e0f1741eaa463442426ebaff4bf7b6/grex-1.0.2-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f80bb501a28b560780c78b69ae2ad8f8bba861e05c8a2507abe1d383772a9bbd", size = 1160649, upload-time = "2025-11-14T12:27:35.034Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/d7/9282cc624b8f2a78cd12a72d3af9a4925b4662b0924120ab52529274bd0b/grex-1.0.2-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:594fd1c3f4e310330a223f088ccbedd289148e74d0e213f00d265f45b8d3a607", size = 1319329, upload-time = "2025-11-14T12:27:36.496Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/86/b7c263bd9644ceb8a7004d06e5a08fa2392f89af852147e44f0b59247f5d/grex-1.0.2-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:5bbb5f48446632b361658ce79e43fdacda89c93944886b3374bd74183e64412b", size = 1361758, upload-time = "2025-11-14T12:27:37.666Z" },
+    { url = "https://files.pythonhosted.org/packages/93/0f/43d5895f49bb0c7357b1528ba94629e981b0c2630a254c23db0505bc2116/grex-1.0.2-cp314-cp314-win_amd64.whl", hash = "sha256:bf9c3be6bfd4e28ab8eeb9eb6ff6f7d3579db5a03ca613845e8445624ac355d9", size = 909563, upload-time = "2025-11-14T12:27:38.848Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/83/02d5a3da0c03bcd5651ed6bb21960ba190f6c13b99f48613597ee8c6a1e5/grex-1.0.2-cp314-cp314-win_arm64.whl", hash = "sha256:538b4498bb879e4209fb2497836302fe7be1568496ad1d75919cabac34d3e18a", size = 841385, upload-time = "2025-11-14T12:27:39.986Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1030,6 +1045,7 @@ version = "0.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "grex" },
     { name = "pydantic" },
     { name = "scraper-rust" },
     { name = "silkworm-rs" },
@@ -1044,6 +1060,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=3.1.1" },
+    { name = "grex", specifier = ">=1.0.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "scraper-rust", specifier = ">=0.4.3" },
     { name = "silkworm-rs", specifier = ">=0.4.4" },
