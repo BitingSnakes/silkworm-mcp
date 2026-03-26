@@ -13,6 +13,7 @@ An example: https://github.com/BitingSnakes/silkworm-example
 
 - Fetch pages through silkworm's regular HTTP client or CDP renderer.
 - Query selectors directly against a CDP-rendered DOM snapshot.
+- Analyze inline and linked CSS with `tinycss2`, then optionally map selectors back onto HTML.
 - Extract structured records from live rendered pages before committing to a full crawl.
 - Cache HTML in a local document store and reuse it via `document_handle`.
 - Bound the document cache with max-document, max-bytes, and idle-TTL controls.
@@ -34,6 +35,7 @@ An example: https://github.com/BitingSnakes/silkworm-example
 - `parse_html_fragment`
 - `prettify_document`
 - `query_selector`
+- `analyze_css_selectors`
 - `find_selectors_by_text`
 - `compare_selectors`
 - `extract_links`
@@ -148,7 +150,7 @@ Key runtime environment variables:
 1. Call `silkworm_fetch` for the target page.
 2. Use the returned `document_handle` with `inspect_document`.
 3. Use `parse_html_document` or `parse_html_fragment` when you need exact parser structure, node types, or parser errors.
-4. Use `find_selectors_by_text` to derive candidates from visible text, then iterate on `query_selector` and `compare_selectors`.
+4. Use `find_selectors_by_text` to derive candidates from visible text, then iterate on `query_selector`, `compare_selectors`, and `analyze_css_selectors` when stylesheet structure or hidden elements matter.
 5. For JS-heavy pages, use `query_selector_cdp` or `extract_structured_data_cdp` against the rendered DOM.
 6. Use `extract_links` to verify pagination or detail pages.
 7. Feed the stable plan into `run_crawl_blueprint`.

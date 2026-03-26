@@ -30,6 +30,7 @@ EXPECTED_TOOL_NAMES = {
     "parse_html_document",
     "parse_html_fragment",
     "query_selector",
+    "analyze_css_selectors",
     "compare_selectors",
     "find_selectors_by_text",
     "extract_links",
@@ -396,6 +397,21 @@ def test_stdio_transport_covers_every_tool(tmp_path: Path) -> None:
                 )
                 assert (
                     compared.structured_content["comparisons"][2]["total_matches"] == 2
+                )
+
+                css_analysis = await client.call_tool(
+                    "analyze_css_selectors",
+                    {
+                        "document_handle": stored_handle,
+                        "css": ".product .price { color: red; } .next { display: none; }",
+                        "match_html": True,
+                    },
+                )
+                assert css_analysis.structured_content["total_selectors"] == 2
+                assert css_analysis.structured_content["hidden_selector_count"] == 1
+                assert (
+                    css_analysis.structured_content["selectors"][0]["matched_elements"]
+                    == 2
                 )
 
                 links = await client.call_tool(

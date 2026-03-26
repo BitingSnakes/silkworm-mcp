@@ -167,6 +167,45 @@ class LinkExtractionResult(BaseModel):
     links: list[LinkMatch] = Field(default_factory=list)
 
 
+class CssStylesheetSource(BaseModel):
+    kind: Literal["input", "inline", "linked"]
+    source_url: str | None = None
+    fetched: bool
+    inline_index: int | None = None
+    byte_length: int | None = None
+    encoding: str | None = None
+    qualified_rule_count: int = 0
+    selector_count: int = 0
+    error: str | None = None
+
+
+class CssSelectorAnalysis(BaseModel):
+    selector: str
+    specificity: tuple[int, int, int]
+    declarations: dict[str, str] = Field(default_factory=dict)
+    hides_elements: bool = False
+    at_rule_context: list[str] = Field(default_factory=list)
+    stylesheet_index: int
+    stylesheet_kind: Literal["input", "inline", "linked"]
+    stylesheet_url: str | None = None
+    matched_elements: int | None = None
+    match_preview: list[SelectorMatch] = Field(default_factory=list)
+
+
+class CssSelectorAnalysisResult(BaseModel):
+    document_handle: str | None = None
+    source_url: str | None = None
+    linked_stylesheet_urls: list[str] = Field(default_factory=list)
+    total_stylesheets: int
+    total_selectors: int
+    hidden_selector_count: int
+    returned_selectors: int
+    omitted_selectors: int
+    stylesheets: list[CssStylesheetSource] = Field(default_factory=list)
+    selectors: list[CssSelectorAnalysis] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class PrettifyResult(BaseModel):
     document_handle: str | None = None
     source_url: str | None = None
