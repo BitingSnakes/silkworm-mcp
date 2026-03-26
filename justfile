@@ -21,6 +21,8 @@ lint:
 format:
     uv run --group dev ruff format .
 
+fmt: format
+
 test:
     uv run --group dev pytest
 

@@ -25,6 +25,7 @@ from mcp_server import (
     DocumentStore,
     SelectorMode,
     SpiderTemplateVariant,
+    analyze_css_selectors,
     clear_documents,
     find_selectors_by_text,
     generate_regex,
@@ -118,6 +119,124 @@ def test_generate_regex_supports_core_grex_options() -> None:
     assert result.pattern == "^(?:aa|(?:bc){2}|(?:def){3})$"
     assert result.convert_repetitions is True
     assert result.minimum_substring_length == 2
+
+
+def test_analyze_css_selectors_matches_inline_rules_against_html() -> None:
+    html = """
+    <html>
+      <head>
+        <style>
+          .product .price { color: red; }
+          .hidden { display: none; }
+          @media screen and (min-width: 800px) {
+            article.product > h2.name { font-weight: 700; }
+          }
+        </style>
+      </head>
+      <body>
+        <article class="product">
+          <h2 class="name">Widget A</h2>
+          <span class="price">$10</span>
+          <div class="hidden">Trap</div>
+        </article>
+        <article class="product">
+          <h2 class="name">Widget B</h2>
+          <span class="price">$20</span>
+        </article>
+      </body>
+    </html>
+    """.strip()
+
+    result = asyncio.run(
+        analyze_css_selectors(
+            html=html,
+            source_url="https://example.com/catalog",
+            fetch_linked_stylesheets=False,
+            match_html=True,
+            include_match_html=False,
+        )
+    )
+
+    assert result.total_stylesheets == 1
+    assert result.total_selectors == 3
+    assert result.hidden_selector_count == 1
+    assert result.linked_stylesheet_urls == []
+    assert result.stylesheets[0].kind == "inline"
+    assert result.stylesheets[0].qualified_rule_count == 3
+
+    selectors = {entry.selector: entry for entry in result.selectors}
+    assert selectors[".product .price"].matched_elements == 2
+    assert selectors[".hidden"].hides_elements is True
+    assert selectors[".hidden"].matched_elements == 1
+    assert selectors["article.product > h2.name"].at_rule_context == [
+        "@media screen and (min-width: 800px)"
+    ]
+
+
+def test_analyze_css_selectors_filters_to_hiding_rules() -> None:
+    result = asyncio.run(
+        analyze_css_selectors(
+            css=".visible { display: block; } .hidden, [hidden] { display: none; }",
+            only_hiding_selectors=True,
+        )
+    )
+
+    assert result.total_stylesheets == 1
+    assert result.total_selectors == 2
+    assert result.hidden_selector_count == 2
+    assert [entry.selector for entry in result.selectors] == [".hidden", "[hidden]"]
+
+
+def test_analyze_css_selectors_extracts_and_fetches_linked_stylesheets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = """
+    <html>
+      <head>
+        <link rel="stylesheet" href="/assets/site.css">
+        <style>.hero { color: blue; }</style>
+      </head>
+      <body><div class="hero">Hero</div><div class="badge">New</div></body>
+    </html>
+    """.strip()
+    fetched_urls: list[str] = []
+
+    async def fake_fetch_css_stylesheet(
+        url: str,
+        *,
+        timeout_seconds: float,
+    ) -> tuple[bytes, str | None]:
+        fetched_urls.append(url)
+        assert timeout_seconds == 20.0
+        return b".badge { visibility: hidden; }", "utf-8"
+
+    monkeypatch.setattr(mcp_tools, "_fetch_css_stylesheet", fake_fetch_css_stylesheet)
+
+    result = asyncio.run(
+        analyze_css_selectors(
+            html=html,
+            source_url="https://example.com/catalog",
+            match_html=True,
+            include_match_html=False,
+        )
+    )
+
+    assert fetched_urls == ["https://example.com/assets/site.css"]
+    assert result.linked_stylesheet_urls == ["https://example.com/assets/site.css"]
+    assert result.total_stylesheets == 2
+    assert result.total_selectors == 2
+    assert result.hidden_selector_count == 1
+
+    linked_stylesheet = next(
+        stylesheet for stylesheet in result.stylesheets if stylesheet.kind == "linked"
+    )
+    assert linked_stylesheet.fetched is True
+    assert linked_stylesheet.encoding == "utf-8"
+
+    selectors = {entry.selector: entry for entry in result.selectors}
+    assert selectors[".hero"].matched_elements == 1
+    assert selectors[".badge"].hides_elements is True
+    assert selectors[".badge"].matched_elements == 1
 
 
 def test_find_selectors_by_text_round_trips_css_and_xpath() -> None:

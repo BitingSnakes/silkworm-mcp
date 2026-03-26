@@ -34,6 +34,7 @@ from . import resources as _resources
 from . import tools as _tools
 
 clear_documents = _tools.clear_documents
+analyze_css_selectors = _tools.analyze_css_selectors
 find_selectors_by_text = _tools.find_selectors_by_text
 generate_regex = _tools.generate_regex
 list_documents = _tools.list_documents
@@ -65,6 +66,7 @@ __all__ = [
     "SpiderTemplateResult",
     "SpiderTemplateVariant",
     "_build_cdp_client",
+    "analyze_css_selectors",
     "clear_documents",
     "find_selectors_by_text",
     "generate_regex",

@@ -7,19 +7,24 @@ from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urljoin
+import xml.etree.ElementTree as ET
 
+import cssselect2
+from cssselect2 import parser as cssselect2_parser
 import scraper_rs
 from fastmcp.exceptions import ToolError
 from rnet import Emulation
 from silkworm import Request, Spider
 from silkworm.cdp import CDPClient
 from silkworm.exceptions import HttpError
+from silkworm.http import HttpClient
 from silkworm.middlewares import (
     DelayMiddleware,
     RetryMiddleware,
     SkipNonHTMLMiddleware,
     UserAgentMiddleware,
 )
+import tinycss2
 
 from .constants import (
     DEFAULT_HTML_MAX_SIZE_BYTES,
@@ -35,6 +40,7 @@ from .documents import StoredDocument
 from .models import (
     CrawlBlueprint,
     CrawlFieldSpec,
+    CssSelectorAnalysis,
     DocumentSummary,
     FetchResult,
     HtmlParseNode,
@@ -328,6 +334,28 @@ def _serialize_element(
     )
 
 
+def _serialize_etree_element(
+    element: ET.Element,
+    *,
+    index: int,
+    include_html: bool,
+    text_chars: int,
+    html_chars: int,
+) -> SelectorMatch:
+    return SelectorMatch(
+        index=index,
+        tag=str(element.tag),
+        text=_clip(_collapse_whitespace("".join(element.itertext())), text_chars),
+        html=_clip(
+            ET.tostring(element, encoding="unicode", method="html"),
+            html_chars,
+        )
+        if include_html
+        else None,
+        attrs=dict(element.attrib),
+    )
+
+
 def _query_document(
     document: scraper_rs.Document,
     *,
@@ -520,6 +548,295 @@ def _xpath_literal(value: str) -> str:
         if index != len(parts) - 1:
             rendered_parts.append('"\'"')
     return f"concat({', '.join(rendered_parts)})"
+
+
+def _extract_css_from_html(
+    html: str,
+    *,
+    base_url: str | None,
+    max_size_bytes: int | None,
+    truncate_on_limit: bool,
+) -> tuple[list[str], list[str]]:
+    document = scraper_rs.Document(
+        html,
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+    try:
+        inline_css = [
+            css_text
+            for style in document.select("style")
+            if (css_text := (style.text or "").strip())
+        ]
+
+        linked_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for link in document.select("link[rel][href]"):
+            href = link.attr("href")
+            rel = _collapse_whitespace(link.attr("rel")).casefold().split()
+            if not href or "stylesheet" not in rel:
+                continue
+            resolved_url = urljoin(base_url, href) if base_url else href
+            if resolved_url in seen_urls:
+                continue
+            seen_urls.add(resolved_url)
+            linked_urls.append(resolved_url)
+        return linked_urls, inline_css
+    finally:
+        document.close()
+
+
+async def _fetch_css_stylesheet(
+    url: str,
+    *,
+    timeout_seconds: float,
+) -> tuple[bytes, str | None]:
+    client = HttpClient(
+        emulation=_normalize_emulation("Firefox139"),
+        timeout=timeout_seconds,
+        keep_alive=False,
+    )
+    try:
+        try:
+            response = await client.fetch(Request(url=url))
+        except HttpError as exc:
+            raise ToolError(
+                f"Fetch failed for stylesheet {url}: {_clip(str(exc), 240)}"
+            )
+        try:
+            return bytes(response.body), response.encoding
+        finally:
+            response.close()
+    finally:
+        await client.close()
+
+
+def _build_cssselect2_root(
+    html: str,
+    *,
+    max_size_bytes: int | None,
+    truncate_on_limit: bool,
+) -> cssselect2.ElementWrapper:
+    parsed_root = _parse_html_tree(
+        html,
+        parse_mode="document",
+        max_size_bytes=max_size_bytes,
+        truncate_on_limit=truncate_on_limit,
+    )
+
+    def append_children(parent: ET.Element, node: HtmlParseNode) -> None:
+        for child in node.children:
+            if child.node_type == "text":
+                text = child.text or ""
+                if not text:
+                    continue
+                if len(parent):
+                    last_child = parent[-1]
+                    last_child.tail = f"{last_child.tail or ''}{text}"
+                else:
+                    parent.text = f"{parent.text or ''}{text}"
+                continue
+
+            if child.node_type == "element" and child.tag:
+                element = ET.Element(child.tag, dict(child.attrs or {}))
+                parent.append(element)
+                append_children(element, child)
+                continue
+
+            append_children(parent, child)
+
+    html_node = next(
+        (
+            child
+            for child in parsed_root.children
+            if child.node_type == "element" and child.tag == "html"
+        ),
+        None,
+    )
+    if html_node is not None:
+        root = ET.Element("html", dict(html_node.attrs or {}))
+        append_children(root, html_node)
+        return cssselect2.ElementWrapper.from_html_root(root)
+
+    root = ET.Element("html")
+    body = ET.SubElement(root, "body")
+    append_children(body, parsed_root)
+    return cssselect2.ElementWrapper.from_html_root(root)
+
+
+def _parse_css_declarations(content: Any) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    for declaration in tinycss2.parse_declaration_list(
+        content,
+        skip_comments=True,
+        skip_whitespace=True,
+    ):
+        if declaration.type != "declaration":
+            continue
+        value = tinycss2.serialize(declaration.value).strip()
+        if declaration.important:
+            value = f"{value} !important"
+        declarations[declaration.lower_name] = value
+    return declarations
+
+
+def _split_selector_prelude(prelude: list[Any]) -> list[str]:
+    selectors: list[str] = []
+    current: list[Any] = []
+
+    for token in prelude:
+        if token.type == "literal" and getattr(token, "value", None) == ",":
+            selector = tinycss2.serialize(current).strip()
+            if selector:
+                selectors.append(selector)
+            current = []
+            continue
+        current.append(token)
+
+    selector = tinycss2.serialize(current).strip()
+    if selector:
+        selectors.append(selector)
+    return selectors
+
+
+def _declarations_hide_elements(declarations: dict[str, str]) -> bool:
+    display = declarations.get("display", "").casefold().replace(" ", "")
+    visibility = declarations.get("visibility", "").casefold().replace(" ", "")
+    return display == "none" or visibility == "hidden"
+
+
+def _match_compiled_selector(
+    root: cssselect2.ElementWrapper,
+    selector_text: str,
+    *,
+    limit: int,
+    include_html: bool,
+    text_chars: int,
+    html_chars: int,
+) -> tuple[int, list[SelectorMatch]]:
+    compiled_selector = cssselect2.compile_selector_list(selector_text)[0]
+    matched_elements = [
+        element.etree_element
+        for element in root.iter_subtree()
+        if compiled_selector.test(element)
+    ]
+    preview = [
+        _serialize_etree_element(
+            element,
+            index=index,
+            include_html=include_html,
+            text_chars=text_chars,
+            html_chars=html_chars,
+        )
+        for index, element in enumerate(matched_elements[:limit])
+    ]
+    return len(matched_elements), preview
+
+
+def _analyze_stylesheet_rules(
+    rules: list[Any],
+    *,
+    stylesheet_index: int,
+    stylesheet_kind: Literal["input", "inline", "linked"],
+    stylesheet_url: str | None,
+    match_root: cssselect2.ElementWrapper | None,
+    match_limit: int,
+    include_match_html: bool,
+    text_chars: int,
+    html_chars: int,
+    warnings: list[str],
+) -> tuple[int, list[CssSelectorAnalysis]]:
+    selectors: list[CssSelectorAnalysis] = []
+    qualified_rule_count = 0
+
+    def walk(rule_list: list[Any], context: list[str]) -> None:
+        nonlocal qualified_rule_count
+
+        for rule in rule_list:
+            if rule.type == "error":
+                warnings.append(
+                    f"Skipped CSS parse error in {stylesheet_url or stylesheet_kind}: "
+                    f"{_clip(getattr(rule, 'message', 'unknown error'), 160)}"
+                )
+                continue
+
+            if rule.type == "at-rule":
+                if rule.content is None:
+                    continue
+                prelude = tinycss2.serialize(rule.prelude).strip()
+                label = f"@{rule.lower_at_keyword}"
+                if prelude:
+                    label = f"{label} {prelude}"
+                nested_rules = tinycss2.parse_rule_list(
+                    rule.content,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+                walk(nested_rules, [*context, label])
+                continue
+
+            if rule.type != "qualified-rule":
+                continue
+
+            qualified_rule_count += 1
+            declarations = _parse_css_declarations(rule.content)
+            hides_elements = _declarations_hide_elements(declarations)
+
+            try:
+                parsed_selectors = list(cssselect2_parser.parse(rule.prelude))
+            except Exception as exc:
+                selector_text = tinycss2.serialize(rule.prelude).strip()
+                warnings.append(
+                    f"Skipped invalid selector list '{_clip(selector_text, 160)}' "
+                    f"from {stylesheet_url or stylesheet_kind}: {exc}"
+                )
+                continue
+
+            selector_texts = _split_selector_prelude(rule.prelude)
+            for index, parsed_selector in enumerate(parsed_selectors):
+                selector_text = (
+                    selector_texts[index]
+                    if index < len(selector_texts)
+                    else str(parsed_selector).strip()
+                )
+                if not selector_text:
+                    continue
+
+                matched_elements: int | None = None
+                match_preview: list[SelectorMatch] = []
+                if match_root is not None:
+                    try:
+                        matched_elements, match_preview = _match_compiled_selector(
+                            match_root,
+                            selector_text,
+                            limit=match_limit,
+                            include_html=include_match_html,
+                            text_chars=text_chars,
+                            html_chars=html_chars,
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            f"Failed to match selector '{_clip(selector_text, 160)}' "
+                            f"against HTML: {exc}"
+                        )
+
+                selectors.append(
+                    CssSelectorAnalysis(
+                        selector=selector_text,
+                        specificity=parsed_selector.specificity,
+                        declarations=dict(declarations),
+                        hides_elements=hides_elements,
+                        at_rule_context=list(context),
+                        stylesheet_index=stylesheet_index,
+                        stylesheet_kind=stylesheet_kind,
+                        stylesheet_url=stylesheet_url,
+                        matched_elements=matched_elements,
+                        match_preview=match_preview,
+                    )
+                )
+
+    walk(rules, [])
+    return qualified_rule_count, selectors
 
 
 def _build_css_segment(

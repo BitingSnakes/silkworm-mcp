@@ -10,6 +10,7 @@ import scraper_rs
 from silkworm import HTMLResponse, Request
 from silkworm.exceptions import HttpError
 from silkworm.http import HttpClient
+import tinycss2
 
 from .constants import (
     DEFAULT_HTML_MAX_SIZE_BYTES,
@@ -20,12 +21,16 @@ from .helpers import (
     _build_health_report,
     _build_server_status,
     _build_summary,
+    _build_cssselect2_root,
     _clip,
     _document_base_url,
+    _extract_css_from_html,
     _extract_static_item,
+    _fetch_css_stylesheet,
     _fetch_html_via_cdp,
     _find_inverse_selector_matches,
     _normalize_emulation,
+    _analyze_stylesheet_rules,
     _parse_html_tree,
     _query_document,
     _query_pair_to_mode_and_query,
@@ -37,6 +42,8 @@ from .helpers import (
 from .models import (
     ClearDocumentsResult,
     CrawlFieldSpec,
+    CssSelectorAnalysisResult,
+    CssStylesheetSource,
     DeleteDocumentResult,
     DocumentSummary,
     FetchResult,
@@ -437,6 +444,221 @@ def compare_selectors(
         )
     finally:
         document.close()
+
+
+@mcp.tool(tags={"selectors", "css"})
+async def analyze_css_selectors(
+    document_handle: str | None = None,
+    html: str | None = None,
+    css: str | None = None,
+    source_url: str | None = None,
+    include_inline_styles: bool = True,
+    include_linked_stylesheets: bool = True,
+    fetch_linked_stylesheets: bool = True,
+    only_hiding_selectors: bool = False,
+    match_html: bool = False,
+    limit: int = 100,
+    match_limit: int = 5,
+    include_match_html: bool = False,
+    text_chars: int = 180,
+    html_chars: int = 400,
+    timeout_seconds: float = 20.0,
+    max_size_bytes: int = DEFAULT_HTML_MAX_SIZE_BYTES,
+    truncate_on_limit: bool = False,
+) -> CssSelectorAnalysisResult:
+    """Parse inline, linked, or raw CSS with tinycss2 and optionally match selectors back onto HTML."""
+    if not any(value is not None for value in (document_handle, html, css)):
+        raise ToolError(
+            "Provide CSS via 'css' and/or HTML via 'document_handle' or 'html'."
+        )
+    if limit < 0:
+        raise ToolError("'limit' must be >= 0.")
+    if match_limit < 0:
+        raise ToolError("'match_limit' must be >= 0.")
+
+    resolved_html: str | None = None
+    stored_document: StoredDocument | None = None
+    if document_handle is not None or html is not None:
+        resolved_html, stored_document = _resolve_document_input(
+            document_handle=document_handle,
+            html=html,
+        )
+    if match_html and resolved_html is None:
+        raise ToolError("'match_html' requires HTML via 'document_handle' or 'html'.")
+
+    base_url = _document_base_url(stored_document, source_url)
+    match_root = (
+        _build_cssselect2_root(
+            resolved_html,
+            max_size_bytes=max_size_bytes,
+            truncate_on_limit=truncate_on_limit,
+        )
+        if match_html and resolved_html is not None
+        else None
+    )
+
+    linked_stylesheet_urls: list[str] = []
+    inline_css_blocks: list[str] = []
+    if resolved_html is not None and (
+        include_inline_styles or include_linked_stylesheets
+    ):
+        linked_stylesheet_urls, inline_css_blocks = _extract_css_from_html(
+            resolved_html,
+            base_url=base_url,
+            max_size_bytes=max_size_bytes,
+            truncate_on_limit=truncate_on_limit,
+        )
+        if not include_inline_styles:
+            inline_css_blocks = []
+        if not include_linked_stylesheets:
+            linked_stylesheet_urls = []
+
+    stylesheets: list[CssStylesheetSource] = []
+    all_selectors = []
+    warnings: list[str] = []
+
+    def add_stylesheet_analysis(
+        rules: list[Any],
+        *,
+        kind: Literal["input", "inline", "linked"],
+        stylesheet_url: str | None,
+        fetched: bool,
+        inline_index: int | None,
+        byte_length: int | None,
+        encoding: str | None,
+        error: str | None = None,
+    ) -> None:
+        stylesheet_index = len(stylesheets)
+        qualified_rule_count, selector_entries = _analyze_stylesheet_rules(
+            rules,
+            stylesheet_index=stylesheet_index,
+            stylesheet_kind=kind,
+            stylesheet_url=stylesheet_url,
+            match_root=match_root,
+            match_limit=match_limit,
+            include_match_html=include_match_html,
+            text_chars=text_chars,
+            html_chars=html_chars,
+            warnings=warnings,
+        )
+        stylesheets.append(
+            CssStylesheetSource(
+                kind=kind,
+                source_url=stylesheet_url,
+                fetched=fetched,
+                inline_index=inline_index,
+                byte_length=byte_length,
+                encoding=encoding,
+                qualified_rule_count=qualified_rule_count,
+                selector_count=len(selector_entries),
+                error=error,
+            )
+        )
+        all_selectors.extend(selector_entries)
+
+    if css is not None:
+        add_stylesheet_analysis(
+            tinycss2.parse_stylesheet(
+                css,
+                skip_comments=True,
+                skip_whitespace=True,
+            ),
+            kind="input",
+            stylesheet_url=base_url,
+            fetched=False,
+            inline_index=None,
+            byte_length=len(css.encode("utf-8")),
+            encoding="utf-8",
+        )
+
+    for inline_index, inline_css in enumerate(inline_css_blocks):
+        add_stylesheet_analysis(
+            tinycss2.parse_stylesheet(
+                inline_css,
+                skip_comments=True,
+                skip_whitespace=True,
+            ),
+            kind="inline",
+            stylesheet_url=base_url,
+            fetched=False,
+            inline_index=inline_index,
+            byte_length=len(inline_css.encode("utf-8")),
+            encoding="utf-8",
+        )
+
+    for stylesheet_url in linked_stylesheet_urls:
+        if not fetch_linked_stylesheets:
+            stylesheets.append(
+                CssStylesheetSource(
+                    kind="linked",
+                    source_url=stylesheet_url,
+                    fetched=False,
+                    inline_index=None,
+                    byte_length=None,
+                    encoding=None,
+                    qualified_rule_count=0,
+                    selector_count=0,
+                )
+            )
+            continue
+
+        try:
+            stylesheet_bytes, protocol_encoding = await _fetch_css_stylesheet(
+                stylesheet_url,
+                timeout_seconds=timeout_seconds,
+            )
+            parsed_rules, parsed_encoding = tinycss2.parse_stylesheet_bytes(
+                stylesheet_bytes,
+                protocol_encoding=protocol_encoding,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            add_stylesheet_analysis(
+                parsed_rules,
+                kind="linked",
+                stylesheet_url=stylesheet_url,
+                fetched=True,
+                inline_index=None,
+                byte_length=len(stylesheet_bytes),
+                encoding=getattr(parsed_encoding, "name", None) or protocol_encoding,
+            )
+        except Exception as exc:
+            warning = f"Failed to analyze linked stylesheet {stylesheet_url}: {exc}"
+            warnings.append(warning)
+            stylesheets.append(
+                CssStylesheetSource(
+                    kind="linked",
+                    source_url=stylesheet_url,
+                    fetched=False,
+                    inline_index=None,
+                    byte_length=None,
+                    encoding=None,
+                    qualified_rule_count=0,
+                    selector_count=0,
+                    error=str(exc),
+                )
+            )
+
+    filtered_selectors = (
+        [entry for entry in all_selectors if entry.hides_elements]
+        if only_hiding_selectors
+        else all_selectors
+    )
+    limited_selectors = filtered_selectors[:limit]
+
+    return CssSelectorAnalysisResult(
+        document_handle=stored_document.handle if stored_document else None,
+        source_url=base_url,
+        linked_stylesheet_urls=linked_stylesheet_urls,
+        total_stylesheets=len(stylesheets),
+        total_selectors=len(filtered_selectors),
+        hidden_selector_count=sum(1 for entry in all_selectors if entry.hides_elements),
+        returned_selectors=len(limited_selectors),
+        omitted_selectors=max(0, len(filtered_selectors) - len(limited_selectors)),
+        stylesheets=stylesheets,
+        selectors=limited_selectors,
+        warnings=warnings,
+    )
 
 
 @mcp.tool(tags={"selectors"})
